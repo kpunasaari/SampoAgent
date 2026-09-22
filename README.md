@@ -32,6 +32,12 @@ Open [http://127.0.0.1:8765](http://127.0.0.1:8765). The service intentionally b
 - Confirmed-fact-only PDF CV output and ATS text re-parse validation.
 - Provider-neutral browser-agent interface and a safe unconfigured fallback.
 
+## Interface
+
+SampoAgent uses a responsive dark interface with a persistent sidebar,
+explicit safety states, keyboard-visible focus, and local server-rendered
+forms. It works without a Node or browser build step.
+
 ## Privacy and limitations
 
 Candidate data is stored in local SQLite. No AI key is required: Minimal deterministic mode is the default. Live job discovery and final web-form submission require a compliant source or browser-agent integration and may require user action for authentication, CAPTCHAs, or high-risk questions.

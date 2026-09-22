@@ -20,6 +20,7 @@ class Repository:
             CREATE TABLE IF NOT EXISTS candidate_profile (id INTEGER PRIMARY KEY CHECK(id=1), name TEXT NOT NULL, email TEXT, locale TEXT NOT NULL DEFAULT 'en');
             CREATE TABLE IF NOT EXISTS facts (id INTEGER PRIMARY KEY, type TEXT NOT NULL, value TEXT NOT NULL, provenance TEXT NOT NULL, source_id TEXT, confidence REAL NOT NULL, confirmed INTEGER NOT NULL DEFAULT 0, rejected INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS candidate_records (id INTEGER PRIMARY KEY, record_type TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS cv_templates (id INTEGER PRIMARY KEY, name TEXT NOT NULL, language TEXT NOT NULL, role_family TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS career_profiles (id INTEGER PRIMARY KEY, name TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, notes TEXT NOT NULL DEFAULT '');
             CREATE TABLE IF NOT EXISTS job_sources (id INTEGER PRIMARY KEY, name TEXT NOT NULL, url TEXT NOT NULL, country TEXT NOT NULL, source_type TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1, capability TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS jobs (id INTEGER PRIMARY KEY, title TEXT NOT NULL, company TEXT NOT NULL, location TEXT, language TEXT NOT NULL, description TEXT NOT NULL, application_url TEXT NOT NULL, fingerprint TEXT UNIQUE NOT NULL, verification_state TEXT NOT NULL, deadline TEXT);
@@ -90,6 +91,20 @@ class Repository:
     def candidate_records(self, record_type: str) -> list[dict[str, str]]:
         rows = self.connection.execute("SELECT payload FROM candidate_records WHERE record_type=? ORDER BY id DESC", (record_type,))
         return [json.loads(row[0]) for row in rows]
+
+    def add_cv_template(self, *, name: str, language: str, role_family: str, notes: str = "") -> int:
+        if language not in {"fi", "en"}:
+            raise ValueError("Unsupported template language")
+        cursor = self.connection.execute(
+            "INSERT INTO cv_templates(name, language, role_family, notes, created_at) VALUES (?, ?, ?, ?, ?)",
+            (name.strip(), language, role_family, notes.strip(), datetime.now(timezone.utc).isoformat()),
+        )
+        self.log("cv_template_registered", name)
+        self.connection.commit()
+        return int(cursor.lastrowid)
+
+    def cv_templates(self) -> list[dict[str, object]]:
+        return [dict(row) for row in self.connection.execute("SELECT * FROM cv_templates ORDER BY id DESC")]
 
     def add_career_profile(self, name: str, notes: str = "") -> int:
         cursor = self.connection.execute("INSERT INTO career_profiles(name, notes) VALUES (?, ?)", (name.strip(), notes.strip()))

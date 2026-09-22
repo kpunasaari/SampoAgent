@@ -8,5 +8,6 @@ def test_job_language_can_be_overridden_before_queueing() -> None:
     application = client.get("/applications")
 
     assert "Language: fi" in updated.text
+    assert "<option value='fi' selected>fi</option>" in updated.text
     assert queued.status_code == 303
     assert "QUEUED" in application.text

@@ -124,7 +124,7 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
             action = ""
             if not score.queue_eligible and not score.hard_blocked and not override:
                 action = f"<form method='post' action='/jobs/{job['id']}/override'><input name='note' placeholder='Why review this?' required><button>Override for review</button></form>"
-            language_form = f"<form method='post' action='/jobs/{job['id']}/language'><label>Language: {escape(str(job['language']))}<select name='language'><option value='fi'>fi</option><option value='en'>en</option></select></label><button>Set</button></form>"
+            language_form = f"<form method='post' action='/jobs/{job['id']}/language'><label>Language: {escape(str(job['language']))}<select name='language'><option value='fi'{' selected' if job['language'] == 'fi' else ''}>fi</option><option value='en'{' selected' if job['language'] == 'en' else ''}>en</option></select></label><button>Set</button></form>"
             return f"<tr><td>{escape(str(job['title']))}</td><td>{escape(str(job['company']))}</td><td>{escape(str(job['location']))}</td><td>{escape(str(job['verification_state']))}<br>{language_form}</td><td>{'Blocked: ' + escape('; '.join(score.hard_failures)) if score.hard_blocked else f'{score.final_score:.0f}%'} </td><td>{escape(' · '.join(score.explanations))}<br>{escape(override_text)}{action}</td></tr>"
 
         rows = "".join(job_row(job) for job in job_rows) or "<tr><td colspan='6'>No jobs match your current preferences.</td></tr>"

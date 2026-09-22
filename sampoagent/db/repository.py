@@ -23,6 +23,7 @@ class Repository:
             CREATE TABLE IF NOT EXISTS career_profiles (id INTEGER PRIMARY KEY, name TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, notes TEXT NOT NULL DEFAULT '');
             CREATE TABLE IF NOT EXISTS job_sources (id INTEGER PRIMARY KEY, name TEXT NOT NULL, url TEXT NOT NULL, country TEXT NOT NULL, source_type TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1, capability TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS jobs (id INTEGER PRIMARY KEY, title TEXT NOT NULL, company TEXT NOT NULL, location TEXT, language TEXT NOT NULL, description TEXT NOT NULL, application_url TEXT NOT NULL, fingerprint TEXT UNIQUE NOT NULL, verification_state TEXT NOT NULL, deadline TEXT);
+            CREATE TABLE IF NOT EXISTS job_overrides (job_id INTEGER PRIMARY KEY, decision TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, FOREIGN KEY(job_id) REFERENCES jobs(id));
             CREATE TABLE IF NOT EXISTS applications (id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL, status TEXT NOT NULL, queue_state TEXT NOT NULL, language TEXT NOT NULL, cv_path TEXT, notes TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(job_id) REFERENCES jobs(id));
             CREATE TABLE IF NOT EXISTS submission_evidence (id INTEGER PRIMARY KEY, application_id INTEGER NOT NULL, final_url TEXT NOT NULL, confirmation_message TEXT NOT NULL, confirmation_id TEXT, agent_provider TEXT NOT NULL, created_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS answer_bank (id INTEGER PRIMARY KEY, category TEXT NOT NULL, question TEXT NOT NULL, value TEXT NOT NULL, source TEXT NOT NULL, created_at TEXT NOT NULL);
@@ -174,6 +175,20 @@ class Repository:
         return self.connection.execute(
             "SELECT 1 FROM applications WHERE job_id=? LIMIT 1", (job_id,)
         ).fetchone() is not None
+
+    def set_job_override(self, job_id: int, *, decision: str, note: str = "") -> None:
+        if decision not in {"review"}:
+            raise ValueError("Unsupported job override")
+        self.connection.execute(
+            "INSERT INTO job_overrides(job_id, decision, note, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(job_id) DO UPDATE SET decision=excluded.decision, note=excluded.note, created_at=excluded.created_at",
+            (job_id, decision, note.strip(), datetime.now(timezone.utc).isoformat()),
+        )
+        self.log("job_override", f"{job_id}: {decision}")
+        self.connection.commit()
+
+    def job_override(self, job_id: int) -> dict[str, object] | None:
+        row = self.connection.execute("SELECT * FROM job_overrides WHERE job_id=?", (job_id,)).fetchone()
+        return dict(row) if row else None
 
     def update_application_status(self, application_id: int, status: str, note: str = "") -> None:
         now = datetime.now(timezone.utc).isoformat()

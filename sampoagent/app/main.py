@@ -116,11 +116,17 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
     @app.get("/jobs", response_class=HTMLResponse)
     def jobs() -> HTMLResponse:
         job_rows = [job for job in repository.rows("jobs") if matches_preferences(job=job, preferences=repository.preferences())]
-        rows = "".join(
-            f"<tr><td>{escape(str(job['title']))}</td><td>{escape(str(job['company']))}</td><td>{escape(str(job['location']))}</td><td>{escape(str(job['verification_state']))}</td><td>{'Blocked: ' + escape('; '.join(score.hard_failures)) if score.hard_blocked else f'{score.final_score:.0f}%'} </td><td>{escape(' · '.join(score.explanations))}</td></tr>"
-            for job in job_rows
-            for score in [score_for_job(job)]
-        ) or "<tr><td colspan='6'>No jobs match your current preferences.</td></tr>"
+
+        def job_row(job: dict[str, object]) -> str:
+            score = score_for_job(job)
+            override = repository.job_override(int(job["id"]))
+            override_text = "User review override active" if override else ""
+            action = ""
+            if not score.queue_eligible and not score.hard_blocked and not override:
+                action = f"<form method='post' action='/jobs/{job['id']}/override'><input name='note' placeholder='Why review this?' required><button>Override for review</button></form>"
+            return f"<tr><td>{escape(str(job['title']))}</td><td>{escape(str(job['company']))}</td><td>{escape(str(job['location']))}</td><td>{escape(str(job['verification_state']))}</td><td>{'Blocked: ' + escape('; '.join(score.hard_failures)) if score.hard_blocked else f'{score.final_score:.0f}%'} </td><td>{escape(' · '.join(score.explanations))}<br>{escape(override_text)}{action}</td></tr>"
+
+        rows = "".join(job_row(job) for job in job_rows) or "<tr><td colspan='6'>No jobs match your current preferences.</td></tr>"
         form = "<form method='post' action='/jobs/import'><label>Title <input name='title' required></label> <label>Employer <input name='company' required></label> <label>Location <input name='location' required></label> <label>Description <input name='description' required></label> <label>Application URL <input name='application_url' type='url' required></label> <button>Import job</button></form>"
         return _page("Jobs", f"<section><p>Manual URL and description import is available locally; protected sites remain browser-only.</p>{form}</section><section><p>Scores use only confirmed facts. Eligibility, competitive strength, and confidence are calculated per job; hard failures override the numerical score.</p><table><tr><th>Title</th><th>Employer</th><th>Location</th><th>Verification</th><th>Score</th><th>Why</th></tr>{rows}</table></section>")
 
@@ -128,6 +134,15 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
     def import_job(title: str = Form(...), company: str = Form(...), location: str = Form(...), description: str = Form(...), application_url: str = Form(...)) -> RedirectResponse:
         job = normalize_job(title=title, company=company, location=location, description=description, application_url=application_url)
         repository.add_job(job, verification_state(deadline=None, employer=company, application_url=application_url))
+        return RedirectResponse("/jobs", status_code=303)
+
+    @app.post("/jobs/{job_id}/override")
+    def override_job_for_review(job_id: int, note: str = Form(...)) -> RedirectResponse:
+        job = repository.job(job_id)
+        if job and note.strip():
+            score = score_for_job(job)
+            if not score.hard_blocked and not score.queue_eligible:
+                repository.set_job_override(job_id, decision="review", note=note)
         return RedirectResponse("/jobs", status_code=303)
 
     @app.get("/sources", response_class=HTMLResponse)
@@ -178,7 +193,8 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
         if repository.has_application_for_job(job_id):
             return RedirectResponse("/queue?notice=" + quote("This job already has an application record."), status_code=303)
         score = score_for_job(job)
-        if not score.queue_eligible:
+        override = repository.job_override(job_id)
+        if not score.queue_eligible and not (override and override["decision"] == "review" and not score.hard_blocked):
             reason = " ".join(score.hard_failures) or "This job is below the configured queue threshold."
             return RedirectResponse("/queue?notice=" + quote(reason), status_code=303)
         repository.queue_application(job_id, language=str(job["language"]), cv_path=None)

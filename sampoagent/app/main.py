@@ -287,7 +287,9 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
 
     @app.get("/agent", response_class=HTMLResponse)
     def agent() -> HTMLResponse:
-        return _page("Agent & System Status", "<section><table><tr><th>Component</th><th>Status</th></tr><tr><td>Core database</td><td>Online</td></tr><tr><td>Finnish templates</td><td>Valid</td></tr><tr><td>English templates</td><td>Valid</td></tr><tr><td>AI provider</td><td>Not configured — deterministic mode active</td></tr><tr><td>Browser agent</td><td>Not configured — manual action required</td></tr></table></section>")
+        usage = repository.ai_usage_summary()
+        usage_text = f"AI usage: {usage['requests']} requests · {usage['input_tokens']} input tokens · {usage['output_tokens']} output tokens · {usage['cached_tokens']} cached tokens"
+        return _page("Agent & System Status", f"<section><table><tr><th>Component</th><th>Status</th></tr><tr><td>Core database</td><td>Online</td></tr><tr><td>Finnish templates</td><td>Valid</td></tr><tr><td>English templates</td><td>Valid</td></tr><tr><td>AI provider</td><td>Not configured — deterministic mode active</td></tr><tr><td>Browser agent</td><td>Not configured — manual action required</td></tr></table><p>{escape(usage_text)}</p><p class='notice'>Usage remains zero in default Minimal mode. Provider adapters may record approximate usage when their API exposes it.</p></section>")
 
     @app.get("/settings", response_class=HTMLResponse)
     def settings() -> HTMLResponse:

@@ -31,6 +31,7 @@ class Repository:
             CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS activity_log (id INTEGER PRIMARY KEY, action TEXT NOT NULL, details TEXT NOT NULL, created_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS semantic_cache (cache_key TEXT PRIMARY KEY, value TEXT NOT NULL, created_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS ai_usage (id INTEGER PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, feature TEXT NOT NULL, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, cached_tokens INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS documents (id INTEGER PRIMARY KEY, kind TEXT NOT NULL, path TEXT NOT NULL, checksum TEXT, created_at TEXT NOT NULL);
             """
         )
@@ -288,6 +289,31 @@ class Repository:
         self.connection.execute("DELETE FROM semantic_cache")
         self.log("semantic_cache_cleared", "User requested cache reset")
         self.connection.commit()
+
+    def record_ai_usage(
+        self,
+        *,
+        provider: str,
+        model: str,
+        feature: str,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        cached_tokens: int = 0,
+    ) -> int:
+        if any(value < 0 for value in (input_tokens, output_tokens, cached_tokens)):
+            raise ValueError("AI token usage cannot be negative")
+        cursor = self.connection.execute(
+            "INSERT INTO ai_usage(provider, model, feature, input_tokens, output_tokens, cached_tokens, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (provider, model, feature, input_tokens, output_tokens, cached_tokens, datetime.now(timezone.utc).isoformat()),
+        )
+        self.connection.commit()
+        return int(cursor.lastrowid)
+
+    def ai_usage_summary(self) -> dict[str, int]:
+        row = self.connection.execute(
+            "SELECT COUNT(*) AS requests, COALESCE(SUM(input_tokens), 0) AS input_tokens, COALESCE(SUM(output_tokens), 0) AS output_tokens, COALESCE(SUM(cached_tokens), 0) AS cached_tokens FROM ai_usage"
+        ).fetchone()
+        return {key: int(row[key]) for key in ("requests", "input_tokens", "output_tokens", "cached_tokens")}
 
     def add_source(self, *, name: str, url: str, country: str, source_type: str, notes: str = "") -> int:
         if not url.startswith(("https://", "http://")):

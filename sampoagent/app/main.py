@@ -218,13 +218,14 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
     @app.get("/settings", response_class=HTMLResponse)
     def settings() -> HTMLResponse:
         configs = load_configs(repository.setting("scoring_config"))
+        preferences = repository.preferences()
         score_inputs = "".join(
             f"<fieldset><legend>{name.replace('_', ' ').title()}</legend><label>Enabled <select name='{name}_enabled'><option value='yes'{' selected' if config.enabled else ''}>Yes</option><option value='no'{' selected' if not config.enabled else ''}>No</option></select></label> <label>{name.replace('_', ' ').title()} weight <input name='{name}_weight' type='number' min='0' max='100' value='{config.weight:g}' required></label> <label>{name.replace('_', ' ').title()} minimum <input name='{name}_minimum' type='number' min='0' max='100' value='{config.minimum:g}' required></label></fieldset>"
             for name, config in configs.items()
         )
-        form = f"<form method='post' action='/settings'><label>Application mode <select name='application_mode'><option value='review_everything'>Review Everything</option><option value='smart_approval'>Smart Approval</option><option value='autopilot'>Autopilot</option></select></label> <label>Daily application limit <input name='daily_limit' type='number' min='0' value='{escape(repository.setting('daily_limit') or '0')}'></label> <label>AI usage <select name='ai_usage_mode'><option value='minimal'>Minimal</option><option value='balanced'>Balanced</option><option value='quality'>Quality</option></select></label><h3>Explainable scoring configuration</h3><p>Enabled dimensions are reweighted automatically. A job must meet every enabled minimum.</p>{score_inputs}<button>Save settings</button></form>"
+        form = f"<form method='post' action='/settings'><label>Application mode <select name='application_mode'><option value='review_everything'>Review Everything</option><option value='smart_approval'>Smart Approval</option><option value='autopilot'>Autopilot</option></select></label> <label>Daily application limit <input name='daily_limit' type='number' min='0' value='{escape(repository.setting('daily_limit') or '0')}'></label> <label>AI usage <select name='ai_usage_mode'><option value='minimal'>Minimal</option><option value='balanced'>Balanced</option><option value='quality'>Quality</option></select></label><h3>Job preferences</h3><label>Preferred locations <input name='locations' value='{escape(str(preferences.get('locations', '')))}' placeholder='Helsinki, Vantaa'></label> <label>Work type <select name='work_type'><option value='any'>Any</option><option value='onsite'>On-site</option><option value='hybrid'>Hybrid</option><option value='remote'>Remote</option></select></label> <label>Search keywords <input name='keywords' value='{escape(str(preferences.get('keywords', '')))}'></label> <label>Minimum monthly salary (€) <input name='salary_minimum' type='number' min='0' value='{escape(str(preferences.get('salary_minimum', 0)))}'></label><h3>Explainable scoring configuration</h3><p>Enabled dimensions are reweighted automatically. A job must meet every enabled minimum.</p>{score_inputs}<button>Save settings</button></form>"
         disabled = ", ".join(f"{name.replace('_', ' ').title()} is disabled" for name, config in configs.items() if not config.enabled) or "No disabled dimensions"
-        return _page("Settings", f"<section><p>Application mode: {escape(repository.setting('application_mode') or 'review_everything')}</p><p>Daily application limit: {escape(repository.setting('daily_limit') or '0')}</p><p>AI usage mode: {escape(repository.setting('ai_usage_mode') or 'minimal')}</p><p>{escape(disabled)}</p>{form}</section>")
+        return _page("Settings", f"<section><p>Application mode: {escape(repository.setting('application_mode') or 'review_everything')}</p><p>Daily application limit: {escape(repository.setting('daily_limit') or '0')}</p><p>AI usage mode: {escape(repository.setting('ai_usage_mode') or 'minimal')}</p><p>Preferred locations: {escape(str(preferences.get('locations', 'Any')))}</p><p>Work type: {escape(str(preferences.get('work_type', 'any')))}</p><p>Minimum monthly salary: {escape(str(preferences.get('salary_minimum', 0)))}</p><p>{escape(disabled)}</p>{form}</section>")
 
     @app.post("/settings")
     def save_settings(
@@ -240,8 +241,12 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
         confidence_enabled: str = Form("yes"),
         confidence_weight: float = Form(15),
         confidence_minimum: float = Form(40),
+        locations: str = Form(""),
+        work_type: str = Form("any"),
+        keywords: str = Form(""),
+        salary_minimum: int = Form(0),
     ) -> RedirectResponse:
-        if application_mode not in {"review_everything", "smart_approval", "autopilot"} or ai_usage_mode not in {"minimal", "balanced", "quality"} or daily_limit < 0:
+        if application_mode not in {"review_everything", "smart_approval", "autopilot"} or ai_usage_mode not in {"minimal", "balanced", "quality"} or work_type not in {"any", "onsite", "hybrid", "remote"} or daily_limit < 0 or salary_minimum < 0:
             return RedirectResponse("/settings", status_code=303)
         raw_dimensions = {
             "eligibility": (eligibility_enabled, eligibility_weight, eligibility_minimum),
@@ -260,6 +265,7 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
         repository.set_setting("daily_limit", str(daily_limit))
         repository.set_setting("ai_usage_mode", ai_usage_mode)
         repository.set_setting("scoring_config", dump_configs(configs))
+        repository.save_preferences({"locations": locations.strip(), "work_type": work_type, "keywords": keywords.strip(), "salary_minimum": salary_minimum})
         return RedirectResponse("/settings", status_code=303)
 
     @app.get("/cvs", response_class=HTMLResponse)

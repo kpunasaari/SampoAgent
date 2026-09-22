@@ -11,6 +11,7 @@ from sampoagent.careers.recommendations import recommend_occupations
 from sampoagent.candidate.service import ingest_text_cv, read_cv_file
 from sampoagent.country_packs.finland import builtin_sources
 from sampoagent.db.repository import Repository
+from sampoagent.jobs.matching import matches_preferences
 from sampoagent.jobs.service import normalize_job, verification_state
 from sampoagent.jobs.sources import source_health
 from sampoagent.scoring.engine import DimensionConfig
@@ -112,12 +113,12 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
 
     @app.get("/jobs", response_class=HTMLResponse)
     def jobs() -> HTMLResponse:
-        job_rows = repository.rows("jobs")
+        job_rows = [job for job in repository.rows("jobs") if matches_preferences(job=job, preferences=repository.preferences())]
         rows = "".join(
             f"<tr><td>{escape(str(job['title']))}</td><td>{escape(str(job['company']))}</td><td>{escape(str(job['location']))}</td><td>{escape(str(job['verification_state']))}</td><td>{'Blocked: ' + escape('; '.join(score.hard_failures)) if score.hard_blocked else f'{score.final_score:.0f}%'} </td><td>{escape(' · '.join(score.explanations))}</td></tr>"
             for job in job_rows
             for score in [score_for_job(job)]
-        ) or "<tr><td colspan='6'>No jobs imported.</td></tr>"
+        ) or "<tr><td colspan='6'>No jobs match your current preferences.</td></tr>"
         form = "<form method='post' action='/jobs/import'><label>Title <input name='title' required></label> <label>Employer <input name='company' required></label> <label>Location <input name='location' required></label> <label>Description <input name='description' required></label> <label>Application URL <input name='application_url' type='url' required></label> <button>Import job</button></form>"
         return _page("Jobs", f"<section><p>Manual URL and description import is available locally; protected sites remain browser-only.</p>{form}</section><section><p>Scores use only confirmed facts. Eligibility, competitive strength, and confidence are calculated per job; hard failures override the numerical score.</p><table><tr><th>Title</th><th>Employer</th><th>Location</th><th>Verification</th><th>Score</th><th>Why</th></tr>{rows}</table></section>")
 

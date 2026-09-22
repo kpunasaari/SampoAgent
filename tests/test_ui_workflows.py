@@ -19,11 +19,32 @@ def test_profile_and_queue_keep_their_existing_form_contracts() -> None:
 
 def test_answers_keep_explicit_risk_text() -> None:
     client = TestClient(create_app(database_path=":memory:"))
+    client.post(
+        "/answers",
+        data={
+            "category": "FACT",
+            "question": "What is your passport number?",
+            "value": "Never store this",
+            "source": "USER_CONFIRMED",
+        },
+    )
 
     page = client.get("/answers")
 
     assert "High-risk questions always require your intervention" in page.text
-    assert "status-risk" in page.text
+    assert '<span class="status status-risk">HIGH</span>' in page.text
+
+
+def test_settings_groups_controls_without_changing_the_form_endpoint() -> None:
+    client = TestClient(create_app(database_path=":memory:"))
+
+    page = client.get("/settings")
+
+    assert "class='settings-group'" in page.text
+    assert "Application controls" in page.text
+    assert "Job preferences" in page.text
+    assert "Explainable scoring configuration" in page.text
+    assert "action='/settings'" in page.text
 
 
 def test_cv_page_keeps_generation_and_download_workflow_visible(tmp_path: Path) -> None:

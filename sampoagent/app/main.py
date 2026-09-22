@@ -217,8 +217,14 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
             + "</ul></details>"
             for item in application_items
         ) or "<p>No application activity yet.</p>"
+        evidence = "".join(
+            f"<details><summary>Application {item['id']} submission evidence</summary>"
+            + "".join(f"<p>{escape(str(entry['confirmation_message']))} · {escape(str(entry['confirmation_id'] or 'No reference ID'))} · <a href='{escape(str(entry['final_url']))}'>Confirmation URL</a></p>" for entry in repository.submission_evidence_for_application(int(item["id"])))
+            + f"<form method='post' action='/applications/{item['id']}/evidence'><label>Confirmation URL <input name='final_url' type='url' required></label> <label>Confirmation message <input name='confirmation_message' required></label> <label>Reference ID (optional) <input name='confirmation_id'></label><button>Record evidence</button></form></details>"
+            for item in application_items
+        ) or "<p>No submission evidence yet.</p>"
         message = f"<p class='notice' role='status'>{escape(notice)}</p>" if notice else ""
-        return _page("Applications", f"<section><p>Track status, CV used, notes, and safe submission evidence. No credentials are stored.</p>{message}<table><tr><th>ID</th><th>Status</th><th>CV used</th><th>Latest note</th><th>Action</th></tr>{rows}</table><h3>Timeline</h3>{timelines}</section>")
+        return _page("Applications", f"<section><p>Track status, CV used, notes, and safe submission evidence. No credentials are stored.</p>{message}<table><tr><th>ID</th><th>Status</th><th>CV used</th><th>Latest note</th><th>Action</th></tr>{rows}</table><h3>Timeline</h3>{timelines}<h3>Submission evidence</h3>{evidence}</section>")
 
     @app.post("/applications/{application_id}/status")
     def status_application(application_id: int, status: str = Form(...), note: str = Form("")) -> RedirectResponse:
@@ -230,6 +236,26 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
                 return RedirectResponse("/applications?notice=" + quote("Daily application limit reached. Status was not changed."), status_code=303)
         if status in allowed and application:
             repository.update_application_status(application_id, status, note)
+        return RedirectResponse("/applications", status_code=303)
+
+    @app.post("/applications/{application_id}/evidence")
+    def record_submission_evidence(
+        application_id: int,
+        final_url: str = Form(...),
+        confirmation_message: str = Form(...),
+        confirmation_id: str = Form(""),
+    ) -> RedirectResponse:
+        if repository.application(application_id) and confirmation_message.strip():
+            try:
+                repository.add_submission_evidence(
+                    application_id=application_id,
+                    final_url=final_url.strip(),
+                    confirmation_message=confirmation_message.strip(),
+                    confirmation_id=confirmation_id.strip() or None,
+                    agent_provider="manual",
+                )
+            except ValueError:
+                return RedirectResponse("/applications?notice=" + quote("Evidence must be a safe HTTP(S) confirmation without credentials."), status_code=303)
         return RedirectResponse("/applications", status_code=303)
 
     @app.get("/answers", response_class=HTMLResponse)

@@ -238,6 +238,11 @@ class Repository:
         self.connection.commit()
 
     def add_submission_evidence(self, *, application_id: int, final_url: str, confirmation_message: str, confirmation_id: str | None, agent_provider: str) -> int:
+        combined = " ".join((final_url, confirmation_message, confirmation_id or "")).casefold()
+        if any(marker in combined for marker in ("password", "passwd", "api key", "access token", "secret=")):
+            raise ValueError("Submission evidence must not contain credentials")
+        if not final_url.startswith(("https://", "http://")):
+            raise ValueError("Submission evidence URL must be HTTP(S)")
         cursor = self.connection.execute("INSERT INTO submission_evidence(application_id, final_url, confirmation_message, confirmation_id, agent_provider, created_at) VALUES (?, ?, ?, ?, ?, ?)", (application_id, final_url, confirmation_message, confirmation_id, agent_provider, datetime.now(timezone.utc).isoformat()))
         self.connection.commit()
         return int(cursor.lastrowid)
@@ -245,6 +250,15 @@ class Repository:
     def submission_evidence(self, evidence_id: int) -> dict[str, object] | None:
         row = self.connection.execute("SELECT application_id, final_url, confirmation_message, confirmation_id, agent_provider, created_at FROM submission_evidence WHERE id=?", (evidence_id,)).fetchone()
         return dict(row) if row else None
+
+    def submission_evidence_for_application(self, application_id: int) -> list[dict[str, object]]:
+        return [
+            dict(row)
+            for row in self.connection.execute(
+                "SELECT id, final_url, confirmation_message, confirmation_id, agent_provider, created_at FROM submission_evidence WHERE application_id=? ORDER BY id DESC",
+                (application_id,),
+            )
+        ]
 
     def setting(self, key: str) -> str | None:
         row = self.connection.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()

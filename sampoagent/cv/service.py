@@ -44,6 +44,7 @@ def generate_cv_pdf(
     facts: list[dict[str, object]],
     filename_pattern: str | None = None,
     company: str = "",
+    records: dict[str, list[dict[str, str]]] | None = None,
 ) -> Path:
     if role_family not in ROLE_FAMILIES:
         raise ValueError("Unknown role family")
@@ -61,14 +62,38 @@ def generate_cv_pdf(
     if not filename.casefold().endswith(".pdf"):
         filename += ".pdf"
     path = output_dir / filename
-    labels = {"en": ("Curriculum Vitae", "Skills", "Languages"), "fi": ("Ansioluettelo", "Osaaminen", "Kielet")}
-    heading, skills_label, languages_label = labels.get(language, labels["en"])
+    labels = {
+        "en": ("Curriculum Vitae", "Skills", "Languages", "Work Experience", "Education", "Certificates and Licences"),
+        "fi": ("Ansioluettelo", "Osaaminen", "Kielet", "Työkokemus", "Koulutus", "Todistukset ja luvat"),
+    }
+    heading, skills_label, languages_label, experience_label, education_label, credentials_label = labels.get(language, labels["en"])
     confirmed = [fact for fact in facts if fact.get("confirmed") is True]
     skills = [str(fact["value"]) for fact in confirmed if fact.get("type") == "skill"]
     languages = [str(fact["value"]) for fact in confirmed if fact.get("type") == "language"]
+    structured = records or {}
+
+    def record_lines(record_type: str) -> list[str]:
+        lines: list[str] = []
+        for record in structured.get(record_type, []):
+            title = str(record.get("title") or record.get("name") or "").strip()
+            details = str(record.get("details") or "").strip()
+            if title:
+                lines.append(f"{title} — {details}" if details else title)
+        return lines
+
+    experience = record_lines("experience")
+    education = record_lines("education")
+    credentials = record_lines("certificate") + record_lines("licence")
     canvas = Canvas(str(path), pagesize=A4)
     y = 800
-    for line in (heading, candidate["name"], candidate.get("email", ""), f"Role family: {role_family}", f"{skills_label}: {', '.join(skills)}", f"{languages_label}: {', '.join(languages)}"):
+    lines = [heading, candidate["name"], candidate.get("email", ""), f"Role family: {role_family}", f"{skills_label}: {', '.join(skills)}", f"{languages_label}: {', '.join(languages)}"]
+    if experience:
+        lines.extend([experience_label, *experience])
+    if education:
+        lines.extend([education_label, *education])
+    if credentials:
+        lines.extend([credentials_label, *credentials])
+    for line in lines:
         canvas.drawString(56, y, line)
         y -= 26
     canvas.save()

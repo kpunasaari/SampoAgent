@@ -336,8 +336,15 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
         if not profile:
             return _page("CVs", "<section>Candidate profile is required before generating a CV.</section>")
         facts = repository.rows("facts")
-        path = generate_cv_pdf(output_dir=Path("application_data") / "generated", language=language, role_family=role_family, candidate=profile, facts=facts, filename_pattern=filename_pattern or None, company=company)
-        report = validate_ats_pdf(path, required=[profile["name"], profile.get("email", "")])
+        record_types = ("experience", "education", "certificate", "licence")
+        records = {record_type: repository.candidate_records(record_type) for record_type in record_types}
+        path = generate_cv_pdf(output_dir=Path("application_data") / "generated", language=language, role_family=role_family, candidate=profile, facts=facts, filename_pattern=filename_pattern or None, company=company, records=records)
+        required = [profile["name"]]
+        if profile.get("email"):
+            required.append(profile["email"])
+        required.extend(str(fact["value"]) for fact in facts if fact.get("confirmed") and fact.get("type") in {"skill", "language"})
+        required.extend(str(record.get("title") or record.get("name") or "") for group in records.values() for record in group if record.get("title") or record.get("name"))
+        report = validate_ats_pdf(path, required=required)
         download_path = "/cvs/generated/" + quote(path.name)
         return _page("CV Generated", f"<section><p>Generated: <a href='{escape(download_path)}'>{escape(path.name)}</a></p><p>ATS readability: {report.score}%</p></section>")
 

@@ -183,9 +183,16 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
 
     @app.get("/applications", response_class=HTMLResponse)
     def applications(notice: str = Query(default="")) -> HTMLResponse:
-        rows = "".join(f"<tr><td>{item['id']}</td><td>{escape(str(item['status']))}</td><td><form method='post' action='/applications/{item['id']}/status'><select name='status'><option>APPLIED</option><option>INTERVIEW</option><option>OFFER</option><option>REJECTED</option><option>WITHDRAWN</option></select><input name='note' placeholder='Optional note'><button>Update</button></form></td></tr>" for item in repository.rows("applications")) or "<tr><td colspan='3'>No applications tracked yet.</td></tr>"
+        application_items = repository.rows("applications")
+        rows = "".join(f"<tr><td>{item['id']}</td><td>{escape(str(item['status']))}</td><td>{escape(str(item['cv_path'] or 'Not selected'))}</td><td>{escape(str(item['notes'] or '—'))}</td><td><form method='post' action='/applications/{item['id']}/status'><select name='status'><option>APPLIED</option><option>INTERVIEW</option><option>OFFER</option><option>REJECTED</option><option>WITHDRAWN</option></select><input name='note' placeholder='Optional note'><button>Update</button></form></td></tr>" for item in application_items) or "<tr><td colspan='5'>No applications tracked yet.</td></tr>"
+        timelines = "".join(
+            f"<details><summary>Application {item['id']} timeline</summary><ul>"
+            + "".join(f"<li>{escape(str(event['status']))}: {escape(str(event['note']))}</li>" for event in repository.application_timeline(int(item["id"])))
+            + "</ul></details>"
+            for item in application_items
+        ) or "<p>No application activity yet.</p>"
         message = f"<p class='notice' role='status'>{escape(notice)}</p>" if notice else ""
-        return _page("Applications", f"<section><p>Track status, CV used, notes, and safe submission evidence. No credentials are stored.</p>{message}<table><tr><th>ID</th><th>Status</th><th>Action</th></tr>{rows}</table></section>")
+        return _page("Applications", f"<section><p>Track status, CV used, notes, and safe submission evidence. No credentials are stored.</p>{message}<table><tr><th>ID</th><th>Status</th><th>CV used</th><th>Latest note</th><th>Action</th></tr>{rows}</table><h3>Timeline</h3>{timelines}</section>")
 
     @app.post("/applications/{application_id}/status")
     def status_application(application_id: int, status: str = Form(...), note: str = Form("")) -> RedirectResponse:

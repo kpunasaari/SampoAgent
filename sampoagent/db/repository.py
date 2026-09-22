@@ -177,7 +177,10 @@ class Repository:
 
     def update_application_status(self, application_id: int, status: str, note: str = "") -> None:
         now = datetime.now(timezone.utc).isoformat()
-        self.connection.execute("UPDATE applications SET status=?, updated_at=? WHERE id=?", (status, now, application_id))
+        self.connection.execute(
+            "UPDATE applications SET status=?, notes=CASE WHEN ? <> '' THEN ? ELSE notes END, updated_at=? WHERE id=?",
+            (status, note, note, now, application_id),
+        )
         self.connection.execute("INSERT INTO application_timeline(application_id, status, note, created_at) VALUES (?, ?, ?, ?)", (application_id, status, note, now))
         self.log("application_status_changed", f"{application_id}: {status}")
         self.connection.commit()

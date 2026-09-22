@@ -9,8 +9,10 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from sampoagent.careers.recommendations import recommend_occupations
 from sampoagent.candidate.service import ingest_text_cv, read_cv_file
+from sampoagent.country_packs.finland import builtin_sources
 from sampoagent.db.repository import Repository
 from sampoagent.jobs.service import normalize_job, verification_state
+from sampoagent.jobs.sources import source_health
 from sampoagent.scoring.engine import DimensionConfig
 from sampoagent.scoring.job_score import dump_configs, evaluate_job, load_configs
 from sampoagent.cv.service import ROLE_FAMILIES, generate_cv_pdf, validate_ats_pdf
@@ -127,13 +129,28 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
 
     @app.get("/sources", response_class=HTMLResponse)
     def sources() -> HTMLResponse:
-        rows = "".join(f"<tr><td>{escape(str(source['name']))}</td><td>{escape(str(source['source_type']))}</td><td>{escape(str(source['country']))}</td><td>{escape(str(source['capability']))}</td></tr>" for source in repository.rows("job_sources"))
+        rows = "".join(f"<tr><td>{escape(str(source['name']))}</td><td>{escape(str(source['source_type']))}</td><td>{escape(str(source['country']))}</td><td>{escape(source_health(str(source['url']), str(source['capability'])))}</td></tr>" for source in repository.rows("job_sources"))
         form = "<form method='post' action='/sources'><label>Name <input name='name' required></label> <label>URL <input name='url' type='url' required></label> <label>Country <input name='country' value='Finland' required></label> <label>Type <select name='source_type'><option>job board</option><option>public-sector board</option><option>recruitment agency</option><option>employer career site</option><option>custom</option></select></label> <label>Notes <input name='notes'></label> <button>Add source</button></form>"
-        return _page("Sources", f"<section><p>Sources respect access controls and robots restrictions.</p>{form}</section><section><table><tr><th>Name</th><th>Type</th><th>Country</th><th>Capability</th></tr>{rows}</table></section>")
+        catalogue = " · ".join(source.name for source in builtin_sources())
+        builtins = "<form method='post' action='/sources/builtin'><button>Add missing Finland sources</button></form>"
+        return _page("Sources", f"<section><p>Sources respect access controls and robots restrictions. Protected or interactive sources are browser-only, never scraped.</p>{form}{builtins}<p class='notice'>Finland catalogue: {escape(catalogue)}</p></section><section><table><tr><th>Name</th><th>Type</th><th>Country</th><th>Capability / local health</th></tr>{rows}</table></section>")
 
     @app.post("/sources")
     def add_source(name: str = Form(...), url: str = Form(...), country: str = Form(...), source_type: str = Form(...), notes: str = Form("")) -> RedirectResponse:
         repository.add_source(name=name, url=url, country=country, source_type=source_type, notes=notes)
+        return RedirectResponse("/sources", status_code=303)
+
+    @app.post("/sources/builtin")
+    def add_builtin_sources() -> RedirectResponse:
+        for source in builtin_sources():
+            if not repository.has_source_url(source.url):
+                repository.add_source(
+                    name=source.name,
+                    url=source.url,
+                    country="Finland",
+                    source_type=source.source_type,
+                    notes="Bundled Finland country-pack source",
+                )
         return RedirectResponse("/sources", status_code=303)
 
     @app.get("/queue", response_class=HTMLResponse)

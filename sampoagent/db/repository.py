@@ -257,6 +257,11 @@ class Repository:
         self.connection.commit()
         return int(cursor.lastrowid)
 
+    def has_source_url(self, url: str) -> bool:
+        return self.connection.execute(
+            "SELECT 1 FROM job_sources WHERE url=? LIMIT 1", (url.strip(),)
+        ).fetchone() is not None
+
     def count(self, table: str) -> int:
         if table not in {"facts", "career_profiles", "job_sources", "jobs", "applications", "activity_log", "documents"}:
             raise ValueError("Unsupported table")

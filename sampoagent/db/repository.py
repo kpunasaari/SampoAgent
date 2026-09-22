@@ -117,6 +117,19 @@ class Repository:
         self.log("skill_added", clean)
         self.connection.commit()
 
+    def add_confirmed_fact(self, *, fact_type: str, value: str, source_id: str = "profile") -> int:
+        """Store a directly entered candidate fact as user-confirmed evidence."""
+        clean = value.strip()
+        if not clean:
+            raise ValueError("A fact value is required")
+        cursor = self.connection.execute(
+            "INSERT INTO facts(type, value, provenance, source_id, confidence, confirmed) VALUES (?, ?, 'USER_CONFIRMED', ?, 1, 1)",
+            (fact_type, clean, source_id),
+        )
+        self.log("confirmed_fact_added", f"{fact_type}: {clean}")
+        self.connection.commit()
+        return int(cursor.lastrowid)
+
     def add_extracted_fact(self, *, fact_type: str, value: str, source_id: str, confidence: float) -> int:
         cursor = self.connection.execute("INSERT INTO facts(type, value, provenance, source_id, confidence, confirmed) VALUES (?, ?, 'CV_EXTRACTED', ?, ?, 0)", (fact_type, value, source_id, confidence))
         self.connection.commit()

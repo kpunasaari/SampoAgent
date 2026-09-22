@@ -47,12 +47,26 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
     def profile() -> HTMLResponse:
         facts = repository.rows("facts")
         rows = "".join(f"<tr><td>{escape(str(f['type']))}</td><td>{escape(str(f['value']))}</td><td>{escape(str(f['provenance']))}</td><td>{'Rejected' if f['rejected'] else ('Confirmed' if f['confirmed'] else 'Review needed')}</td><td><form style='display:inline' method='post' action='/profile/facts/{f['id']}/confirm'><button>Confirm</button></form> <form style='display:inline' method='post' action='/profile/facts/{f['id']}/reject'><button>Reject</button></form></td></tr>" for f in facts)
-        return _page("Profile", f"<section><h3>Candidate knowledge profile</h3><p>Every fact retains its source and confirmation state.</p><form method='post' action='/profile/skills'><label>Add confirmed skill <input name='skill' required></label> <button>Add skill</button></form></section><section><table><tr><th>Type</th><th>Value</th><th>Provenance</th><th>State</th><th>Review</th></tr>{rows}</table></section>")
+        record_rows = "".join(
+            f"<tr><td>{escape(record_type.title())}</td><td>{escape(str(record.get('title', '')))}</td><td>{escape(str(record.get('details', '')))}</td></tr>"
+            for record_type in ("experience", "education", "certificate", "licence", "language", "availability")
+            for record in repository.candidate_records(record_type)
+        ) or "<tr><td colspan='3'>No structured profile records yet.</td></tr>"
+        record_form = "<form method='post' action='/profile/records'><label>Record type <select name='record_type'><option value='experience'>Experience</option><option value='education'>Education</option><option value='certificate'>Certificate</option><option value='licence'>Licence</option><option value='language'>Language</option><option value='availability'>Availability</option></select></label> <label>Title <input name='title' required></label> <label>Details <input name='details'></label> <button>Add record</button></form>"
+        return _page("Profile", f"<section><h3>Candidate knowledge profile</h3><p>Every fact retains its source and confirmation state.</p><form method='post' action='/profile/skills'><label>Add confirmed skill <input name='skill' required></label> <button>Add skill</button></form></section><section><h3>Structured background</h3><p>Directly entered records are confirmed facts. CV-imported facts still require your review.</p>{record_form}<table><tr><th>Type</th><th>Title</th><th>Details</th></tr>{record_rows}</table></section><section><table><tr><th>Type</th><th>Value</th><th>Provenance</th><th>State</th><th>Review</th></tr>{rows}</table></section>")
 
     @app.post("/profile/skills")
     def add_skill(skill: str = Form(...)) -> RedirectResponse:
         repository.add_skill(skill)
         return RedirectResponse("/careers", status_code=303)
+
+    @app.post("/profile/records")
+    def add_candidate_record(record_type: str = Form(...), title: str = Form(...), details: str = Form("")) -> RedirectResponse:
+        allowed = {"experience", "education", "certificate", "licence", "language", "availability"}
+        if record_type in allowed and title.strip():
+            repository.add_candidate_record(record_type, {"title": title.strip(), "details": details.strip()})
+            repository.add_confirmed_fact(fact_type=record_type, value=title.strip())
+        return RedirectResponse("/profile", status_code=303)
 
     @app.post("/profile/facts/{fact_id}/confirm")
     def confirm_profile_fact(fact_id: int) -> RedirectResponse:

@@ -53,7 +53,7 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
     def profile() -> HTMLResponse:
         candidate = repository.profile()
         facts = repository.rows("facts")
-        rows = "".join(f"<tr><td>{escape(str(f['type']))}</td><td>{escape(str(f['value']))}</td><td>{escape(str(f['provenance']))}</td><td>{'Rejected' if f['rejected'] else ('Confirmed' if f['confirmed'] else 'Review needed')}</td><td><form style='display:inline' method='post' action='/profile/facts/{f['id']}/confirm'><button>Confirm</button></form> <form style='display:inline' method='post' action='/profile/facts/{f['id']}/reject'><button>Reject</button></form> <form style='display:inline' method='post' action='/profile/facts/{f['id']}/edit'><input name='value' value='{escape(str(f['value']))}' required><button>Correct</button></form></td></tr>" for f in facts)
+        rows = "".join(f"<tr><td>{escape(str(f['type']))}</td><td>{escape(str(f['value']))}</td><td>{escape(str(f['provenance']))}</td><td>{'Rejected' if f['rejected'] else ('Confirmed' if f['confirmed'] else 'Review needed')}</td><td><form style='display:inline' method='post' action='/profile/facts/{f['id']}/confirm'><button>Confirm</button></form> <form style='display:inline' method='post' action='/profile/facts/{f['id']}/reject'><button>Reject</button></form> <form style='display:inline' method='post' action='/profile/facts/{f['id']}/edit'><input name='value' value='{escape(str(f['value']))}' required><button>Correct</button></form> <form style='display:inline' method='post' action='/profile/facts/{f['id']}/delete'><button>Delete</button></form></td></tr>" for f in facts)
         record_rows = "".join(
             f"<tr><td>{escape(record_type.title())}</td><td>{escape(str(record.get('title', '')))}</td><td>{escape(str(record.get('details', '')))}</td></tr>"
             for record_type in ("experience", "education", "certificate", "licence", "language", "availability")
@@ -96,6 +96,11 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
     def edit_profile_fact(fact_id: int, value: str = Form(...)) -> RedirectResponse:
         if value.strip():
             repository.edit_fact(fact_id, value)
+        return RedirectResponse("/profile", status_code=303)
+
+    @app.post("/profile/facts/{fact_id}/delete")
+    def delete_profile_fact(fact_id: int) -> RedirectResponse:
+        repository.delete_fact(fact_id)
         return RedirectResponse("/profile", status_code=303)
 
     @app.get("/careers", response_class=HTMLResponse)
@@ -204,9 +209,11 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
     def queue(notice: str = Query(default="")) -> HTMLResponse:
         queued = repository.rows("applications")
         rows = "".join(f"<tr><td>{item['id']}</td><td>{escape(str(item['queue_state']))}</td><td>{escape(str(item['status']))}</td></tr>" for item in queued) or "<tr><td colspan='3'>No prepared applications yet.</td></tr>"
+        generated_cvs = repository.documents(kind="generated_cv")
+        cv_options = "<option value=''>No CV selected</option>" + "".join(f"<option value='{escape(str(document['path']))}'>{escape(Path(str(document['path'])).name)}</option>" for document in generated_cvs)
         jobs = "".join(
             f"<li>{escape(str(job['title']))} — {f'{score.final_score:.0f}% eligible' if score.queue_eligible else escape('; '.join(score.hard_failures) or 'Below configured score threshold')} "
-            + (f"<form style='display:inline' method='post' action='/queue/prepare/{job['id']}'><button>Prepare safely</button></form>" if score.queue_eligible else "")
+            + (f"<form style='display:inline' method='post' action='/queue/prepare/{job['id']}'><label>CV <select name='cv_path'>{cv_options}</select></label><button>Prepare safely</button></form>" if score.queue_eligible else "")
             + "</li>"
             for job in repository.rows("jobs")
             for score in [score_for_job(job)]
@@ -215,7 +222,7 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
         return _page("Application Queue", f"<section><p>Dry Run prevents final submission. Hard requirement failures and duplicate applications never enter this queue.</p>{message}<h3>Eligible jobs</h3><ul>{jobs}</ul></section><section><table><tr><th>ID</th><th>Queue state</th><th>Status</th></tr>{rows}</table></section>")
 
     @app.post("/queue/prepare/{job_id}")
-    def prepare_queue(job_id: int) -> RedirectResponse:
+    def prepare_queue(job_id: int, cv_path: str = Form("")) -> RedirectResponse:
         job = repository.job(job_id)
         if not job:
             return RedirectResponse("/queue?notice=" + quote("Job was not found."), status_code=303)
@@ -226,7 +233,9 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
         if not score.queue_eligible and not (override and override["decision"] == "review" and not score.hard_blocked):
             reason = " ".join(score.hard_failures) or "This job is below the configured queue threshold."
             return RedirectResponse("/queue?notice=" + quote(reason), status_code=303)
-        repository.queue_application(job_id, language=str(job["language"]), cv_path=None)
+        allowed_cv_paths = {str(document["path"]) for document in repository.documents(kind="generated_cv")}
+        selected_cv = cv_path if cv_path in allowed_cv_paths else None
+        repository.queue_application(job_id, language=str(job["language"]), cv_path=selected_cv)
         return RedirectResponse("/queue?notice=" + quote("Application prepared for review. Dry Run remains enabled."), status_code=303)
 
     @app.get("/applications", response_class=HTMLResponse)
@@ -421,6 +430,7 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
         required.extend(str(fact["value"]) for fact in facts if fact.get("confirmed") and fact.get("type") in {"skill", "language"})
         required.extend(str(record.get("title") or record.get("name") or "") for group in records.values() for record in group if record.get("title") or record.get("name"))
         report = validate_ats_pdf(path, required=required)
+        repository.add_document(kind="generated_cv", path=str(path))
         download_path = "/cvs/generated/" + quote(path.name)
         return _page("CV Generated", f"<section><p>Generated: <a href='{escape(download_path)}'>{escape(path.name)}</a></p><p>ATS readability: {report.score}%</p></section>")
 

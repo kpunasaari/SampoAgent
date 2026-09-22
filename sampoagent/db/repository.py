@@ -167,6 +167,11 @@ class Repository:
         self.log("fact_rejected", str(fact_id))
         self.connection.commit()
 
+    def delete_fact(self, fact_id: int) -> None:
+        self.connection.execute("DELETE FROM facts WHERE id=?", (fact_id,))
+        self.log("fact_deleted", str(fact_id))
+        self.connection.commit()
+
     def add_job(self, job: object, verification: str) -> int | None:
         """Persist a normalized job once; return None when its fingerprint already exists."""
         try:
@@ -329,6 +334,21 @@ class Repository:
             "SELECT COUNT(*) AS requests, COALESCE(SUM(input_tokens), 0) AS input_tokens, COALESCE(SUM(output_tokens), 0) AS output_tokens, COALESCE(SUM(cached_tokens), 0) AS cached_tokens FROM ai_usage"
         ).fetchone()
         return {key: int(row[key]) for key in ("requests", "input_tokens", "output_tokens", "cached_tokens")}
+
+    def add_document(self, *, kind: str, path: str, checksum: str | None = None) -> int:
+        cursor = self.connection.execute(
+            "INSERT INTO documents(kind, path, checksum, created_at) VALUES (?, ?, ?, ?)",
+            (kind, path, checksum, datetime.now(timezone.utc).isoformat()),
+        )
+        self.connection.commit()
+        return int(cursor.lastrowid)
+
+    def documents(self, *, kind: str | None = None) -> list[dict[str, object]]:
+        if kind is None:
+            rows = self.connection.execute("SELECT * FROM documents ORDER BY id DESC")
+        else:
+            rows = self.connection.execute("SELECT * FROM documents WHERE kind=? ORDER BY id DESC", (kind,))
+        return [dict(row) for row in rows]
 
     def add_source(self, *, name: str, url: str, country: str, source_type: str, notes: str = "") -> int:
         if not url.startswith(("https://", "http://")):

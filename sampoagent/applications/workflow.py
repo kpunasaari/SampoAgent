@@ -13,6 +13,10 @@ def classify_question(question: str) -> str:
     lowered = question.casefold()
     if any(term in lowered for term in ("criminal", "health", "medical", "security clearance", "immigration", "work authorization", "authorized to work", "right to work", "työlupa", "työskentelyoikeus", "passport", "nationality", "national identity", "social security", "bank account", "legal")):
         return "HIGH"
+    # A form can ask for a new factual claim that is not in the candidate's
+    # confirmed data. The browser adapter cannot safely infer that answer.
+    if lowered.startswith(("what is your", "please provide your", "enter your", "do you have", "have you", "are you", "how many")):
+        return "HIGH"
     if any(term in lowered for term in ("salary", "motivation", "start date", "experience")):
         return "MEDIUM"
     return "LOW"

@@ -27,6 +27,7 @@ def test_dry_run_and_high_risk_answers_never_submit() -> None:
 
     assert classify_question("Do you have a criminal record?") == "HIGH"
     assert classify_question("What is your passport number?") == "HIGH"
+    assert classify_question("What is your current notice period?") == "HIGH"
     assert can_submit(ApplicationMode.AUTOPILOT, dry_run=True, risk="LOW", applied_today=0, daily_limit=3) is False
     assert can_submit(ApplicationMode.AUTOPILOT, dry_run=False, risk="HIGH", applied_today=0, daily_limit=3) is False
     assert can_submit(ApplicationMode.SMART_APPROVAL, dry_run=False, risk="MEDIUM", applied_today=0, daily_limit=3) is False

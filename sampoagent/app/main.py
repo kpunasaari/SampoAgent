@@ -106,13 +106,37 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
     @app.get("/careers", response_class=HTMLResponse)
     def careers() -> HTMLResponse:
         recommendations = recommend_occupations(repository.confirmed_skills(), ignored=[])
-        content = "".join(f"<tr><td>{escape(item.title_en)} / {escape(item.title_fi)}</td><td>{item.score}%</td><td>{escape(', '.join(item.supporting_facts))}</td><td>Approval required</td></tr>" for item in recommendations) or "<tr><td colspan='4'>Add confirmed skills to receive deterministic recommendations.</td></tr>"
+        targets = repository.target_occupations()
+        active_targets = {(str(target["title_en"]), str(target["title_fi"])) for target in targets if target["enabled"]}
+        content = "".join(
+            f"<tr><td>{escape(item.title_en)} / {escape(item.title_fi)}</td><td>{item.score}%</td><td>{escape(', '.join(item.supporting_facts))}</td><td>{'Active target' if (item.title_en, item.title_fi) in active_targets else f'''<form method='post' action='/careers/targets'><input type='hidden' name='title_en' value='{escape(item.title_en)}'><input type='hidden' name='title_fi' value='{escape(item.title_fi)}'><button>Make target</button></form>'''}</td></tr>"
+            for item in recommendations
+        ) or "<tr><td colspan='4'>Add confirmed skills to receive deterministic recommendations.</td></tr>"
         profiles = "".join(
             f"<tr><td>{escape(str(profile['name']))}</td><td>{escape(str(profile['notes']))}</td><td>{'Active' if profile['enabled'] else 'Inactive'}</td><td><form style='display:inline' method='post' action='/careers/profiles/{profile['id']}/toggle'><button>{'Deactivate' if profile['enabled'] else 'Activate'}</button></form> <form style='display:inline' method='post' action='/careers/profiles/{profile['id']}/delete'><button>Delete</button></form></td></tr>"
             for profile in repository.rows("career_profiles")
         ) or "<tr><td colspan='4'>No career profiles yet.</td></tr>"
+        target_rows = "".join(
+            f"<tr><td>{escape(str(target['title_en']))} / {escape(str(target['title_fi']))}</td><td>{'Active' if target['enabled'] else 'Inactive'}</td><td><form method='post' action='/careers/targets/{target['id']}/toggle'><button>{'Deactivate' if target['enabled'] else 'Activate'}</button></form></td></tr>"
+            for target in targets
+        ) or "<tr><td colspan='3'>No approved targets yet.</td></tr>"
         form = "<form method='post' action='/careers/profiles'><label>Career profile <input name='name' required></label> <label>Notes <input name='notes'></label> <button>Add profile</button></form>"
-        return _page("Career Suggestions", f"<section><p>Recommendations are never activated automatically.</p><table><tr><th>Role</th><th>Match</th><th>Supporting facts</th><th>Target</th></tr>{content}</table></section><section><h3>My career profiles</h3><p>Add more than one career direction; changes affect only your local preferences.</p>{form}<table><tr><th>Name</th><th>Notes</th><th>State</th><th>Actions</th></tr>{profiles}</table></section>")
+        return _page("Career Suggestions", f"<section><p>Recommendations are never activated automatically. Choose Make target only for occupations you want to pursue.</p><table><tr><th>Role</th><th>Match</th><th>Supporting facts</th><th>Target</th></tr>{content}</table></section><section><h3>My target occupations</h3><p>These are your explicit, local target choices. You can pause any target without deleting it.</p><table><tr><th>Role</th><th>State</th><th>Action</th></tr>{target_rows}</table></section><section><h3>My career profiles</h3><p>Add more than one career direction; changes affect only your local preferences.</p>{form}<table><tr><th>Name</th><th>Notes</th><th>State</th><th>Actions</th></tr>{profiles}</table></section>")
+
+    @app.post("/careers/targets")
+    def add_target_occupation(title_en: str = Form(...), title_fi: str = Form(...)) -> RedirectResponse:
+        try:
+            repository.add_target_occupation(title_en, title_fi)
+        except ValueError:
+            pass
+        return RedirectResponse("/careers", status_code=303)
+
+    @app.post("/careers/targets/{target_id}/toggle")
+    def toggle_target_occupation(target_id: int) -> RedirectResponse:
+        target = repository.target_occupation(target_id)
+        if target:
+            repository.set_target_occupation_enabled(target_id, not bool(target["enabled"]))
+        return RedirectResponse("/careers", status_code=303)
 
     @app.post("/careers/profiles")
     def add_career_profile(name: str = Form(...), notes: str = Form("")) -> RedirectResponse:

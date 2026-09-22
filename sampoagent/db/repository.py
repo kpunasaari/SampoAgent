@@ -22,6 +22,7 @@ class Repository:
             CREATE TABLE IF NOT EXISTS candidate_records (id INTEGER PRIMARY KEY, record_type TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS cv_templates (id INTEGER PRIMARY KEY, name TEXT NOT NULL, language TEXT NOT NULL, role_family TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS career_profiles (id INTEGER PRIMARY KEY, name TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, notes TEXT NOT NULL DEFAULT '');
+            CREATE TABLE IF NOT EXISTS target_occupations (id INTEGER PRIMARY KEY, title_en TEXT NOT NULL, title_fi TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, UNIQUE(title_en, title_fi));
             CREATE TABLE IF NOT EXISTS job_sources (id INTEGER PRIMARY KEY, name TEXT NOT NULL, url TEXT NOT NULL, country TEXT NOT NULL, source_type TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1, capability TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS jobs (id INTEGER PRIMARY KEY, title TEXT NOT NULL, company TEXT NOT NULL, location TEXT, language TEXT NOT NULL, description TEXT NOT NULL, application_url TEXT NOT NULL, fingerprint TEXT UNIQUE NOT NULL, verification_state TEXT NOT NULL, deadline TEXT);
             CREATE TABLE IF NOT EXISTS job_overrides (job_id INTEGER PRIMARY KEY, decision TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, FOREIGN KEY(job_id) REFERENCES jobs(id));
@@ -124,6 +125,50 @@ class Repository:
     def delete_career_profile(self, profile_id: int) -> None:
         self.connection.execute("DELETE FROM career_profiles WHERE id=?", (profile_id,))
         self.log("career_profile_deleted", str(profile_id))
+        self.connection.commit()
+
+    def add_target_occupation(self, title_en: str, title_fi: str) -> int:
+        """Save a user-approved occupation target; recommendations never do this implicitly."""
+        english = title_en.strip()
+        finnish = title_fi.strip()
+        if not english or not finnish:
+            raise ValueError("Both occupation titles are required")
+        existing = self.connection.execute(
+            "SELECT id FROM target_occupations WHERE title_en=? AND title_fi=?",
+            (english, finnish),
+        ).fetchone()
+        if existing:
+            self.connection.execute("UPDATE target_occupations SET enabled=1 WHERE id=?", (existing[0],))
+            target_id = int(existing[0])
+        else:
+            cursor = self.connection.execute(
+                "INSERT INTO target_occupations(title_en, title_fi, created_at) VALUES (?, ?, ?)",
+                (english, finnish, datetime.now(timezone.utc).isoformat()),
+            )
+            target_id = int(cursor.lastrowid)
+        self.log("target_occupation_approved", english)
+        self.connection.commit()
+        return target_id
+
+    def target_occupations(self) -> list[dict[str, object]]:
+        return [
+            dict(row)
+            for row in self.connection.execute(
+                "SELECT * FROM target_occupations ORDER BY enabled DESC, title_en"
+            )
+        ]
+
+    def target_occupation(self, target_id: int) -> dict[str, object] | None:
+        row = self.connection.execute(
+            "SELECT * FROM target_occupations WHERE id=?", (target_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def set_target_occupation_enabled(self, target_id: int, enabled: bool) -> None:
+        self.connection.execute(
+            "UPDATE target_occupations SET enabled=? WHERE id=?", (int(enabled), target_id)
+        )
+        self.log("target_occupation_enabled", str(target_id))
         self.connection.commit()
 
     def add_skill(self, value: str) -> None:

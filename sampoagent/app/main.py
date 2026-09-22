@@ -68,7 +68,31 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
     def careers() -> HTMLResponse:
         recommendations = recommend_occupations(repository.confirmed_skills(), ignored=[])
         content = "".join(f"<tr><td>{escape(item.title_en)} / {escape(item.title_fi)}</td><td>{item.score}%</td><td>{escape(', '.join(item.supporting_facts))}</td><td>Approval required</td></tr>" for item in recommendations) or "<tr><td colspan='4'>Add confirmed skills to receive deterministic recommendations.</td></tr>"
-        return _page("Career Suggestions", f"<section><p>Recommendations are never activated automatically.</p><table><tr><th>Role</th><th>Match</th><th>Supporting facts</th><th>Target</th></tr>{content}</table></section>")
+        profiles = "".join(
+            f"<tr><td>{escape(str(profile['name']))}</td><td>{escape(str(profile['notes']))}</td><td>{'Active' if profile['enabled'] else 'Inactive'}</td><td><form style='display:inline' method='post' action='/careers/profiles/{profile['id']}/toggle'><button>{'Deactivate' if profile['enabled'] else 'Activate'}</button></form> <form style='display:inline' method='post' action='/careers/profiles/{profile['id']}/delete'><button>Delete</button></form></td></tr>"
+            for profile in repository.rows("career_profiles")
+        ) or "<tr><td colspan='4'>No career profiles yet.</td></tr>"
+        form = "<form method='post' action='/careers/profiles'><label>Career profile <input name='name' required></label> <label>Notes <input name='notes'></label> <button>Add profile</button></form>"
+        return _page("Career Suggestions", f"<section><p>Recommendations are never activated automatically.</p><table><tr><th>Role</th><th>Match</th><th>Supporting facts</th><th>Target</th></tr>{content}</table></section><section><h3>My career profiles</h3><p>Add more than one career direction; changes affect only your local preferences.</p>{form}<table><tr><th>Name</th><th>Notes</th><th>State</th><th>Actions</th></tr>{profiles}</table></section>")
+
+    @app.post("/careers/profiles")
+    def add_career_profile(name: str = Form(...), notes: str = Form("")) -> RedirectResponse:
+        if name.strip():
+            repository.add_career_profile(name, notes)
+        return RedirectResponse("/careers", status_code=303)
+
+    @app.post("/careers/profiles/{profile_id}/toggle")
+    def toggle_career_profile(profile_id: int) -> RedirectResponse:
+        profile = repository.career_profile(profile_id)
+        if profile:
+            repository.set_career_profile_enabled(profile_id, not bool(profile["enabled"]))
+        return RedirectResponse("/careers", status_code=303)
+
+    @app.post("/careers/profiles/{profile_id}/delete")
+    def delete_career_profile(profile_id: int) -> RedirectResponse:
+        if repository.career_profile(profile_id):
+            repository.delete_career_profile(profile_id)
+        return RedirectResponse("/careers", status_code=303)
 
     @app.get("/jobs", response_class=HTMLResponse)
     def jobs() -> HTMLResponse:

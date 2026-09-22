@@ -10,10 +10,9 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from sampoagent.careers.recommendations import recommend_occupations
 from sampoagent.candidate.service import ingest_text_cv, read_cv_file
 from sampoagent.db.repository import Repository
-from sampoagent.country_packs.finland.requirements import parse_requirements
-from sampoagent.jobs.matching import hard_requirement_failures
 from sampoagent.jobs.service import normalize_job, verification_state
-from sampoagent.scoring.engine import DimensionConfig, evaluate_score
+from sampoagent.scoring.engine import DimensionConfig
+from sampoagent.scoring.job_score import dump_configs, evaluate_job, load_configs
 from sampoagent.cv.service import ROLE_FAMILIES, generate_cv_pdf, validate_ats_pdf
 
 
@@ -30,6 +29,13 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
     repository.initialize()
     repository.load_demo()
     app = FastAPI(title="SampoAgent", docs_url=None, redoc_url=None)
+
+    def score_for_job(job: dict[str, object]) -> object:
+        return evaluate_job(
+            job=job,
+            confirmed_facts=repository.confirmed_fact_values(),
+            configs=load_configs(repository.setting("scoring_config")),
+        )
 
     @app.get("/", response_class=HTMLResponse)
     def dashboard() -> HTMLResponse:
@@ -66,11 +72,14 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
 
     @app.get("/jobs", response_class=HTMLResponse)
     def jobs() -> HTMLResponse:
-        rows = "".join(f"<tr><td>{escape(str(job['title']))}</td><td>{escape(str(job['company']))}</td><td>{escape(str(job['location']))}</td><td>{escape(str(job['verification_state']))}</td></tr>" for job in repository.rows("jobs"))
-        score = evaluate_score(eligibility=85, competitive_strength=75, confidence=80, configs={"eligibility": DimensionConfig(True, 50, 60), "competitive_strength": DimensionConfig(True, 35, 55), "confidence": DimensionConfig(True, 15, 65)}, hard_failures=[])
+        job_rows = repository.rows("jobs")
+        rows = "".join(
+            f"<tr><td>{escape(str(job['title']))}</td><td>{escape(str(job['company']))}</td><td>{escape(str(job['location']))}</td><td>{escape(str(job['verification_state']))}</td><td>{'Blocked: ' + escape('; '.join(score.hard_failures)) if score.hard_blocked else f'{score.final_score:.0f}%'} </td><td>{escape(' · '.join(score.explanations))}</td></tr>"
+            for job in job_rows
+            for score in [score_for_job(job)]
+        ) or "<tr><td colspan='6'>No jobs imported.</td></tr>"
         form = "<form method='post' action='/jobs/import'><label>Title <input name='title' required></label> <label>Employer <input name='company' required></label> <label>Location <input name='location' required></label> <label>Description <input name='description' required></label> <label>Application URL <input name='application_url' type='url' required></label> <button>Import job</button></form>"
-        explanation = f"<p><strong>Eligibility:</strong> 85% · <strong>Competitive Strength:</strong> 75% · <strong>Confidence:</strong> 80% · Final score: {score.final_score:.0f}%</p>"
-        return _page("Jobs", f"<section><p>Manual URL and description import is available locally; protected sites remain browser-only.</p>{form}</section><section>{explanation}<table><tr><th>Title</th><th>Employer</th><th>Location</th><th>Verification</th></tr>{rows}</table></section>")
+        return _page("Jobs", f"<section><p>Manual URL and description import is available locally; protected sites remain browser-only.</p>{form}</section><section><p>Scores use only confirmed facts. Eligibility, competitive strength, and confidence are calculated per job; hard failures override the numerical score.</p><table><tr><th>Title</th><th>Employer</th><th>Location</th><th>Verification</th><th>Score</th><th>Why</th></tr>{rows}</table></section>")
 
     @app.post("/jobs/import")
     def import_job(title: str = Form(...), company: str = Form(...), location: str = Form(...), description: str = Form(...), application_url: str = Form(...)) -> RedirectResponse:
@@ -93,7 +102,13 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
     def queue(notice: str = Query(default="")) -> HTMLResponse:
         queued = repository.rows("applications")
         rows = "".join(f"<tr><td>{item['id']}</td><td>{escape(str(item['queue_state']))}</td><td>{escape(str(item['status']))}</td></tr>" for item in queued) or "<tr><td colspan='3'>No prepared applications yet.</td></tr>"
-        jobs = "".join(f"<li>{escape(str(job['title']))} — <form style='display:inline' method='post' action='/queue/prepare/{job['id']}'><button>Prepare safely</button></form></li>" for job in repository.rows("jobs"))
+        jobs = "".join(
+            f"<li>{escape(str(job['title']))} — {f'{score.final_score:.0f}% eligible' if score.queue_eligible else escape('; '.join(score.hard_failures) or 'Below configured score threshold')} "
+            + (f"<form style='display:inline' method='post' action='/queue/prepare/{job['id']}'><button>Prepare safely</button></form>" if score.queue_eligible else "")
+            + "</li>"
+            for job in repository.rows("jobs")
+            for score in [score_for_job(job)]
+        )
         message = f"<p class='notice' role='status'>{escape(notice)}</p>" if notice else ""
         return _page("Application Queue", f"<section><p>Dry Run prevents final submission. Hard requirement failures and duplicate applications never enter this queue.</p>{message}<h3>Eligible jobs</h3><ul>{jobs}</ul></section><section><table><tr><th>ID</th><th>Queue state</th><th>Status</th></tr>{rows}</table></section>")
 
@@ -104,13 +119,10 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
             return RedirectResponse("/queue?notice=" + quote("Job was not found."), status_code=303)
         if repository.has_application_for_job(job_id):
             return RedirectResponse("/queue?notice=" + quote("This job already has an application record."), status_code=303)
-        requirements = parse_requirements(str(job["description"]))
-        failures = hard_requirement_failures(
-            required=requirements.hard_requirements,
-            confirmed_facts=repository.confirmed_fact_values(),
-        )
-        if failures:
-            return RedirectResponse("/queue?notice=" + quote(" ".join(failures)), status_code=303)
+        score = score_for_job(job)
+        if not score.queue_eligible:
+            reason = " ".join(score.hard_failures) or "This job is below the configured queue threshold."
+            return RedirectResponse("/queue?notice=" + quote(reason), status_code=303)
         repository.queue_application(job_id, language=str(job["language"]), cv_path=None)
         return RedirectResponse("/queue?notice=" + quote("Application prepared for review. Dry Run remains enabled."), status_code=303)
 
@@ -143,16 +155,49 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
 
     @app.get("/settings", response_class=HTMLResponse)
     def settings() -> HTMLResponse:
-        form = f"<form method='post' action='/settings'><label>Application mode <select name='application_mode'><option value='review_everything'>Review Everything</option><option value='smart_approval'>Smart Approval</option><option value='autopilot'>Autopilot</option></select></label> <label>Daily application limit <input name='daily_limit' type='number' min='0' value='{escape(repository.setting('daily_limit') or '0')}'></label> <label>AI usage <select name='ai_usage_mode'><option value='minimal'>Minimal</option><option value='balanced'>Balanced</option><option value='quality'>Quality</option></select></label> <button>Save settings</button></form>"
-        return _page("Settings", f"<section><p>Application mode: {escape(repository.setting('application_mode') or 'review_everything')}</p><p>Daily application limit: {escape(repository.setting('daily_limit') or '0')}</p><p>AI usage mode: {escape(repository.setting('ai_usage_mode') or 'minimal')}</p>{form}</section>")
+        configs = load_configs(repository.setting("scoring_config"))
+        score_inputs = "".join(
+            f"<fieldset><legend>{name.replace('_', ' ').title()}</legend><label>Enabled <select name='{name}_enabled'><option value='yes'{' selected' if config.enabled else ''}>Yes</option><option value='no'{' selected' if not config.enabled else ''}>No</option></select></label> <label>{name.replace('_', ' ').title()} weight <input name='{name}_weight' type='number' min='0' max='100' value='{config.weight:g}' required></label> <label>{name.replace('_', ' ').title()} minimum <input name='{name}_minimum' type='number' min='0' max='100' value='{config.minimum:g}' required></label></fieldset>"
+            for name, config in configs.items()
+        )
+        form = f"<form method='post' action='/settings'><label>Application mode <select name='application_mode'><option value='review_everything'>Review Everything</option><option value='smart_approval'>Smart Approval</option><option value='autopilot'>Autopilot</option></select></label> <label>Daily application limit <input name='daily_limit' type='number' min='0' value='{escape(repository.setting('daily_limit') or '0')}'></label> <label>AI usage <select name='ai_usage_mode'><option value='minimal'>Minimal</option><option value='balanced'>Balanced</option><option value='quality'>Quality</option></select></label><h3>Explainable scoring configuration</h3><p>Enabled dimensions are reweighted automatically. A job must meet every enabled minimum.</p>{score_inputs}<button>Save settings</button></form>"
+        disabled = ", ".join(f"{name.replace('_', ' ').title()} is disabled" for name, config in configs.items() if not config.enabled) or "No disabled dimensions"
+        return _page("Settings", f"<section><p>Application mode: {escape(repository.setting('application_mode') or 'review_everything')}</p><p>Daily application limit: {escape(repository.setting('daily_limit') or '0')}</p><p>AI usage mode: {escape(repository.setting('ai_usage_mode') or 'minimal')}</p><p>{escape(disabled)}</p>{form}</section>")
 
     @app.post("/settings")
-    def save_settings(application_mode: str = Form(...), daily_limit: int = Form(...), ai_usage_mode: str = Form(...)) -> RedirectResponse:
+    def save_settings(
+        application_mode: str = Form(...),
+        daily_limit: int = Form(...),
+        ai_usage_mode: str = Form(...),
+        eligibility_enabled: str = Form("yes"),
+        eligibility_weight: float = Form(50),
+        eligibility_minimum: float = Form(60),
+        competitive_strength_enabled: str = Form("yes"),
+        competitive_strength_weight: float = Form(35),
+        competitive_strength_minimum: float = Form(40),
+        confidence_enabled: str = Form("yes"),
+        confidence_weight: float = Form(15),
+        confidence_minimum: float = Form(40),
+    ) -> RedirectResponse:
         if application_mode not in {"review_everything", "smart_approval", "autopilot"} or ai_usage_mode not in {"minimal", "balanced", "quality"} or daily_limit < 0:
+            return RedirectResponse("/settings", status_code=303)
+        raw_dimensions = {
+            "eligibility": (eligibility_enabled, eligibility_weight, eligibility_minimum),
+            "competitive_strength": (competitive_strength_enabled, competitive_strength_weight, competitive_strength_minimum),
+            "confidence": (confidence_enabled, confidence_weight, confidence_minimum),
+        }
+        if any(enabled not in {"yes", "no"} or not 0 <= weight <= 100 or not 0 <= minimum <= 100 for enabled, weight, minimum in raw_dimensions.values()):
+            return RedirectResponse("/settings", status_code=303)
+        configs = {
+            name: DimensionConfig(enabled=enabled == "yes", weight=weight, minimum=minimum)
+            for name, (enabled, weight, minimum) in raw_dimensions.items()
+        }
+        if not any(config.enabled and config.weight > 0 for config in configs.values()):
             return RedirectResponse("/settings", status_code=303)
         repository.set_setting("application_mode", application_mode)
         repository.set_setting("daily_limit", str(daily_limit))
         repository.set_setting("ai_usage_mode", ai_usage_mode)
+        repository.set_setting("scoring_config", dump_configs(configs))
         return RedirectResponse("/settings", status_code=303)
 
     @app.get("/cvs", response_class=HTMLResponse)

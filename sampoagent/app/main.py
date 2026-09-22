@@ -34,6 +34,7 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
     repository.initialize()
     repository.load_demo()
     app = FastAPI(title="SampoAgent", docs_url=None, redoc_url=None)
+    app.state.repository = repository
 
     def score_for_job(job: dict[str, object]) -> object:
         return evaluate_job(
@@ -292,7 +293,7 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
         return _page("Agent & System Status", f"<section><table><tr><th>Component</th><th>Status</th></tr><tr><td>Core database</td><td>Online</td></tr><tr><td>Finnish templates</td><td>Valid</td></tr><tr><td>English templates</td><td>Valid</td></tr><tr><td>AI provider</td><td>Not configured — deterministic mode active</td></tr><tr><td>Browser agent</td><td>Not configured — manual action required</td></tr></table><p>{escape(usage_text)}</p><p class='notice'>Usage remains zero in default Minimal mode. Provider adapters may record approximate usage when their API exposes it.</p></section>")
 
     @app.get("/settings", response_class=HTMLResponse)
-    def settings() -> HTMLResponse:
+    def settings(notice: str = Query(default="")) -> HTMLResponse:
         configs = load_configs(repository.setting("scoring_config"))
         preferences = repository.preferences()
         application_mode = repository.setting("application_mode") or "review_everything"
@@ -304,7 +305,9 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
         )
         form = f"<form method='post' action='/settings'><label>Application mode <select name='application_mode'><option value='review_everything'{' selected' if application_mode == 'review_everything' else ''}>Review Everything</option><option value='smart_approval'{' selected' if application_mode == 'smart_approval' else ''}>Smart Approval</option><option value='autopilot'{' selected' if application_mode == 'autopilot' else ''}>Autopilot</option></select></label> <label>Daily application limit <input name='daily_limit' type='number' min='0' value='{escape(repository.setting('daily_limit') or '0')}'></label> <label>AI usage <select name='ai_usage_mode'><option value='minimal'{' selected' if ai_usage_mode == 'minimal' else ''}>Minimal</option><option value='balanced'{' selected' if ai_usage_mode == 'balanced' else ''}>Balanced</option><option value='quality'{' selected' if ai_usage_mode == 'quality' else ''}>Quality</option></select></label><h3>Job preferences</h3><label>Preferred locations <input name='locations' value='{escape(str(preferences.get('locations', '')))}' placeholder='Helsinki, Vantaa'></label> <label>Work type <select name='work_type'><option value='any'{' selected' if work_type == 'any' else ''}>Any</option><option value='onsite'{' selected' if work_type == 'onsite' else ''}>On-site</option><option value='hybrid'{' selected' if work_type == 'hybrid' else ''}>Hybrid</option><option value='remote'{' selected' if work_type == 'remote' else ''}>Remote</option></select></label> <label>Search keywords <input name='keywords' value='{escape(str(preferences.get('keywords', '')))}'></label> <label>Minimum monthly salary (€) <input name='salary_minimum' type='number' min='0' value='{escape(str(preferences.get('salary_minimum', 0)))}'></label><h3>Explainable scoring configuration</h3><p>Enabled dimensions are reweighted automatically. A job must meet every enabled minimum.</p>{score_inputs}<button>Save settings</button></form>"
         disabled = ", ".join(f"{name.replace('_', ' ').title()} is disabled" for name, config in configs.items() if not config.enabled) or "No disabled dimensions"
-        return _page("Settings", f"<section><p>Application mode: {escape(repository.setting('application_mode') or 'review_everything')}</p><p>Daily application limit: {escape(repository.setting('daily_limit') or '0')}</p><p>AI usage mode: {escape(repository.setting('ai_usage_mode') or 'minimal')}</p><p>Preferred locations: {escape(str(preferences.get('locations', 'Any')))}</p><p>Work type: {escape(str(preferences.get('work_type', 'any')))}</p><p>Minimum monthly salary: {escape(str(preferences.get('salary_minimum', 0)))}</p><p>{escape(disabled)}</p>{form}</section>")
+        cache_form = "<form method='post' action='/settings/cache/clear'><button>Clear semantic cache</button></form>"
+        message = f"<p class='notice' role='status'>{escape(notice)}</p>" if notice else ""
+        return _page("Settings", f"<section><p>Application mode: {escape(repository.setting('application_mode') or 'review_everything')}</p><p>Daily application limit: {escape(repository.setting('daily_limit') or '0')}</p><p>AI usage mode: {escape(repository.setting('ai_usage_mode') or 'minimal')}</p><p>Preferred locations: {escape(str(preferences.get('locations', 'Any')))}</p><p>Work type: {escape(str(preferences.get('work_type', 'any')))}</p><p>Minimum monthly salary: {escape(str(preferences.get('salary_minimum', 0)))}</p><p>{escape(disabled)}</p>{message}{form}<h3>Local data control</h3><p>Clears cached semantic interpretations only; it does not delete your profile, jobs, applications, or source documents.</p>{cache_form}</section>")
 
     @app.post("/settings")
     def save_settings(
@@ -346,6 +349,11 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
         repository.set_setting("scoring_config", dump_configs(configs))
         repository.save_preferences({"locations": locations.strip(), "work_type": work_type, "keywords": keywords.strip(), "salary_minimum": salary_minimum})
         return RedirectResponse("/settings", status_code=303)
+
+    @app.post("/settings/cache/clear")
+    def clear_semantic_cache() -> RedirectResponse:
+        repository.clear_cache()
+        return RedirectResponse("/settings?notice=" + quote("Semantic cache cleared."), status_code=303)
 
     @app.get("/cvs", response_class=HTMLResponse)
     def cvs() -> HTMLResponse:

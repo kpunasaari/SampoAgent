@@ -302,6 +302,13 @@ class Repository:
         row = self.connection.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
         return dict(row) if row else None
 
+    def set_job_language(self, job_id: int, language: str) -> None:
+        if language not in {"fi", "en"}:
+            raise ValueError("Unsupported job language")
+        self.connection.execute("UPDATE jobs SET language=? WHERE id=?", (language, job_id))
+        self.log("job_language_override", f"{job_id}: {language}")
+        self.connection.commit()
+
     def application(self, application_id: int) -> dict[str, object] | None:
         row = self.connection.execute("SELECT * FROM applications WHERE id=?", (application_id,)).fetchone()
         return dict(row) if row else None

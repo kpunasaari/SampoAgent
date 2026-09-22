@@ -124,7 +124,8 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
             action = ""
             if not score.queue_eligible and not score.hard_blocked and not override:
                 action = f"<form method='post' action='/jobs/{job['id']}/override'><input name='note' placeholder='Why review this?' required><button>Override for review</button></form>"
-            return f"<tr><td>{escape(str(job['title']))}</td><td>{escape(str(job['company']))}</td><td>{escape(str(job['location']))}</td><td>{escape(str(job['verification_state']))}</td><td>{'Blocked: ' + escape('; '.join(score.hard_failures)) if score.hard_blocked else f'{score.final_score:.0f}%'} </td><td>{escape(' · '.join(score.explanations))}<br>{escape(override_text)}{action}</td></tr>"
+            language_form = f"<form method='post' action='/jobs/{job['id']}/language'><label>Language: {escape(str(job['language']))}<select name='language'><option value='fi'>fi</option><option value='en'>en</option></select></label><button>Set</button></form>"
+            return f"<tr><td>{escape(str(job['title']))}</td><td>{escape(str(job['company']))}</td><td>{escape(str(job['location']))}</td><td>{escape(str(job['verification_state']))}<br>{language_form}</td><td>{'Blocked: ' + escape('; '.join(score.hard_failures)) if score.hard_blocked else f'{score.final_score:.0f}%'} </td><td>{escape(' · '.join(score.explanations))}<br>{escape(override_text)}{action}</td></tr>"
 
         rows = "".join(job_row(job) for job in job_rows) or "<tr><td colspan='6'>No jobs match your current preferences.</td></tr>"
         form = "<form method='post' action='/jobs/import'><label>Title <input name='title' required></label> <label>Employer <input name='company' required></label> <label>Location <input name='location' required></label> <label>Description <input name='description' required></label> <label>Application URL <input name='application_url' type='url' required></label> <button>Import job</button></form>"
@@ -143,6 +144,12 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
             score = score_for_job(job)
             if not score.hard_blocked and not score.queue_eligible:
                 repository.set_job_override(job_id, decision="review", note=note)
+        return RedirectResponse("/jobs", status_code=303)
+
+    @app.post("/jobs/{job_id}/language")
+    def override_job_language(job_id: int, language: str = Form(...)) -> RedirectResponse:
+        if repository.job(job_id) and language in {"fi", "en"}:
+            repository.set_job_language(job_id, language)
         return RedirectResponse("/jobs", status_code=303)
 
     @app.get("/sources", response_class=HTMLResponse)

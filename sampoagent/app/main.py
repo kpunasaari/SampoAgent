@@ -45,7 +45,7 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     def dashboard() -> HTMLResponse:
-        cards = [("Jobs found", repository.count("jobs")), ("Recommended", len(recommend_occupations(repository.confirmed_skills(), ignored=[]))), ("Application queue", repository.count("applications")), ("Applied today / daily limit", f"0 / {repository.setting('daily_limit')}")]
+        cards = [("Jobs found", repository.count("jobs")), ("Recommended", len(recommend_occupations(repository.confirmed_skills(), ignored=[]))), ("Application queue", repository.count("applications")), ("Applied today / daily limit", f"{repository.applications_today()} / {repository.setting('daily_limit')}")]
         activity = "".join(f"<li>{escape(str(item['action']))}: {escape(str(item['details']))}</li>" for item in repository.recent_activity(5)) or "<li>No activity yet.</li>"
         return _page("Dashboard", "<section>" + "".join(f'<div class="metric">{escape(str(value))}<small> {label}</small></div>' for label, value in cards) + f"</section><section><h3>Safe by default</h3><p>Dry Run is enabled. SampoAgent never fabricates candidate facts or bypasses application security controls.</p></section><section><h3>Recent activity</h3><ul>{activity}</ul></section>")
 

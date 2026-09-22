@@ -35,11 +35,32 @@ def render_filename(pattern: str, values: dict[str, str]) -> str:
     return rendered or "cv.pdf"
 
 
-def generate_cv_pdf(*, output_dir: Path, language: str, role_family: str, candidate: dict[str, str], facts: list[dict[str, object]]) -> Path:
+def generate_cv_pdf(
+    *,
+    output_dir: Path,
+    language: str,
+    role_family: str,
+    candidate: dict[str, str],
+    facts: list[dict[str, object]],
+    filename_pattern: str | None = None,
+    company: str = "",
+) -> Path:
     if role_family not in ROLE_FAMILIES:
         raise ValueError("Unknown role family")
     output_dir.mkdir(parents=True, exist_ok=True)
-    path = output_dir / _filename(candidate["name"])
+    name_parts = candidate["name"].split(maxsplit=1)
+    values = {
+        "first": name_parts[0],
+        "last": name_parts[1] if len(name_parts) > 1 else "",
+        "fullname": candidate["name"],
+        "role": role_family,
+        "company": company,
+        "language": language,
+    }
+    filename = render_filename(filename_pattern, values) if filename_pattern else _filename(candidate["name"])
+    if not filename.casefold().endswith(".pdf"):
+        filename += ".pdf"
+    path = output_dir / filename
     labels = {"en": ("Curriculum Vitae", "Skills", "Languages"), "fi": ("Ansioluettelo", "Osaaminen", "Kielet")}
     heading, skills_label, languages_label = labels.get(language, labels["en"])
     confirmed = [fact for fact in facts if fact.get("confirmed") is True]

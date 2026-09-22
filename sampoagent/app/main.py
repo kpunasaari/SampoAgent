@@ -5,7 +5,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import FastAPI, File, Form, Query, UploadFile
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
 from sampoagent.careers.recommendations import recommend_occupations
 from sampoagent.candidate.service import ingest_text_cv, read_cv_file
@@ -265,7 +265,7 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
     @app.get("/cvs", response_class=HTMLResponse)
     def cvs() -> HTMLResponse:
         families = "".join(f"<option value='{family}'>{family.replace('_', ' ').title()}</option>" for family in ROLE_FAMILIES)
-        return _page("CVs", f"<section><p>Upload TXT, DOCX, or text-based PDF CVs. Extracted facts remain unconfirmed until reviewed. Built-in FI and EN role-family templates produce ATS-readable PDFs.</p><form method='post' action='/cvs/upload' enctype='multipart/form-data'><label>CV file <input name='file' type='file' accept='.txt,.docx,.pdf' required></label> <button>Upload and extract</button></form></section><section><h3>Generate confirmed-fact CV</h3><form method='post' action='/cvs/generate'><label>Language <select name='language'><option value='fi'>Finnish</option><option value='en'>English</option></select></label><label>Role family <select name='role_family'>{families}</select></label><button>Generate PDF</button></form></section>")
+        return _page("CVs", f"<section><p>Upload TXT, DOCX, or text-based PDF CVs. Extracted facts remain unconfirmed until reviewed. Built-in FI and EN role-family templates produce ATS-readable PDFs.</p><form method='post' action='/cvs/upload' enctype='multipart/form-data'><label>CV file <input name='file' type='file' accept='.txt,.docx,.pdf' required></label> <button>Upload and extract</button></form></section><section><h3>Generate confirmed-fact CV</h3><form method='post' action='/cvs/generate'><label>Language <select name='language'><option value='fi'>Finnish</option><option value='en'>English</option></select></label><label>Role family <select name='role_family'>{families}</select></label><label>Target company (optional) <input name='company'></label><label>Filename pattern <input name='filename_pattern' value='{{first}}_{{last}}_{{role}}_{{language}}.pdf'></label><p class='notice'>Available placeholders: first, last, fullname, role, company, language.</p><button>Generate PDF</button></form></section>")
 
     @app.post("/cvs/upload")
     async def upload_cv(file: UploadFile = File(...)) -> RedirectResponse:
@@ -286,14 +286,30 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
         return RedirectResponse("/profile", status_code=303)
 
     @app.post("/cvs/generate")
-    def generate_cv(language: str = Form(...), role_family: str = Form(...)) -> HTMLResponse:
+    def generate_cv(
+        language: str = Form(...),
+        role_family: str = Form(...),
+        filename_pattern: str = Form(""),
+        company: str = Form(""),
+    ) -> HTMLResponse:
         profile = repository.profile()
         if not profile:
             return _page("CVs", "<section>Candidate profile is required before generating a CV.</section>")
         facts = repository.rows("facts")
-        path = generate_cv_pdf(output_dir=Path("application_data") / "generated", language=language, role_family=role_family, candidate=profile, facts=facts)
+        path = generate_cv_pdf(output_dir=Path("application_data") / "generated", language=language, role_family=role_family, candidate=profile, facts=facts, filename_pattern=filename_pattern or None, company=company)
         report = validate_ats_pdf(path, required=[profile["name"], profile.get("email", "")])
-        return _page("CV Generated", f"<section><p>Generated: {escape(path.name)}</p><p>ATS readability: {report.score}%</p></section>")
+        download_path = "/cvs/generated/" + quote(path.name)
+        return _page("CV Generated", f"<section><p>Generated: <a href='{escape(download_path)}'>{escape(path.name)}</a></p><p>ATS readability: {report.score}%</p></section>")
+
+    @app.get("/cvs/generated/{filename}")
+    def download_generated_cv(filename: str) -> FileResponse:
+        safe_filename = Path(filename).name
+        path = Path("application_data") / "generated" / safe_filename
+        if safe_filename != filename or path.suffix.casefold() != ".pdf" or not path.is_file():
+            from fastapi import HTTPException
+
+            raise HTTPException(status_code=404, detail="Generated CV not found")
+        return FileResponse(path, media_type="application/pdf", filename=safe_filename)
 
     @app.get("/onboarding", response_class=HTMLResponse)
     def onboarding() -> HTMLResponse:

@@ -20,3 +20,4 @@ def test_settings_saves_candidate_job_preferences() -> None:
     assert "Helsinki, Vantaa" in response.text
     assert "hybrid" in response.text
     assert "2400" in response.text
+    assert "<option value='hybrid' selected>Hybrid</option>" in response.text

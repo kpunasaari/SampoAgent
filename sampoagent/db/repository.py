@@ -302,6 +302,15 @@ class Repository:
             "SELECT 1 FROM job_sources WHERE url=? LIMIT 1", (url.strip(),)
         ).fetchone() is not None
 
+    def source(self, source_id: int) -> dict[str, object] | None:
+        row = self.connection.execute("SELECT * FROM job_sources WHERE id=?", (source_id,)).fetchone()
+        return dict(row) if row else None
+
+    def set_source_enabled(self, source_id: int, enabled: bool) -> None:
+        self.connection.execute("UPDATE job_sources SET enabled=? WHERE id=?", (int(enabled), source_id))
+        self.log("source_enabled", f"{source_id}: {enabled}")
+        self.connection.commit()
+
     def count(self, table: str) -> int:
         if table not in {"facts", "career_profiles", "job_sources", "jobs", "applications", "activity_log", "documents"}:
             raise ValueError("Unsupported table")

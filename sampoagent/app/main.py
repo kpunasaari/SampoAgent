@@ -154,11 +154,11 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
 
     @app.get("/sources", response_class=HTMLResponse)
     def sources() -> HTMLResponse:
-        rows = "".join(f"<tr><td>{escape(str(source['name']))}</td><td>{escape(str(source['source_type']))}</td><td>{escape(str(source['country']))}</td><td>{escape(source_health(str(source['url']), str(source['capability'])))}</td></tr>" for source in repository.rows("job_sources"))
+        rows = "".join(f"<tr><td>{escape(str(source['name']))}</td><td>{escape(str(source['source_type']))}</td><td>{escape(str(source['country']))}</td><td>{escape(source_health(str(source['url']), str(source['capability'])))}</td><td>{'Active' if source['enabled'] else 'Inactive'} <form style='display:inline' method='post' action='/sources/{source['id']}/toggle'><button>{'Disable' if source['enabled'] else 'Enable'}</button></form></td></tr>" for source in repository.rows("job_sources"))
         form = "<form method='post' action='/sources'><label>Name <input name='name' required></label> <label>URL <input name='url' type='url' required></label> <label>Country <input name='country' value='Finland' required></label> <label>Type <select name='source_type'><option>job board</option><option>public-sector board</option><option>recruitment agency</option><option>employer career site</option><option>custom</option></select></label> <label>Notes <input name='notes'></label> <button>Add source</button></form>"
         catalogue = " · ".join(source.name for source in builtin_sources())
         builtins = "<form method='post' action='/sources/builtin'><button>Add missing Finland sources</button></form>"
-        return _page("Sources", f"<section><p>Sources respect access controls and robots restrictions. Protected or interactive sources are browser-only, never scraped.</p>{form}{builtins}<p class='notice'>Finland catalogue: {escape(catalogue)}</p></section><section><table><tr><th>Name</th><th>Type</th><th>Country</th><th>Capability / local health</th></tr>{rows}</table></section>")
+        return _page("Sources", f"<section><p>Sources respect access controls and robots restrictions. Protected or interactive sources are browser-only, never scraped.</p>{form}{builtins}<p class='notice'>Finland catalogue: {escape(catalogue)}</p></section><section><table><tr><th>Name</th><th>Type</th><th>Country</th><th>Capability / local health</th><th>State</th></tr>{rows}</table></section>")
 
     @app.post("/sources")
     def add_source(name: str = Form(...), url: str = Form(...), country: str = Form(...), source_type: str = Form(...), notes: str = Form("")) -> RedirectResponse:
@@ -176,6 +176,13 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
                     source_type=source.source_type,
                     notes="Bundled Finland country-pack source",
                 )
+        return RedirectResponse("/sources", status_code=303)
+
+    @app.post("/sources/{source_id}/toggle")
+    def toggle_source(source_id: int) -> RedirectResponse:
+        source = repository.source(source_id)
+        if source:
+            repository.set_source_enabled(source_id, not bool(source["enabled"]))
         return RedirectResponse("/sources", status_code=303)
 
     @app.get("/queue", response_class=HTMLResponse)

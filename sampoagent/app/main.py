@@ -51,6 +51,7 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
 
     @app.get("/profile", response_class=HTMLResponse)
     def profile() -> HTMLResponse:
+        candidate = repository.profile()
         facts = repository.rows("facts")
         rows = "".join(f"<tr><td>{escape(str(f['type']))}</td><td>{escape(str(f['value']))}</td><td>{escape(str(f['provenance']))}</td><td>{'Rejected' if f['rejected'] else ('Confirmed' if f['confirmed'] else 'Review needed')}</td><td><form style='display:inline' method='post' action='/profile/facts/{f['id']}/confirm'><button>Confirm</button></form> <form style='display:inline' method='post' action='/profile/facts/{f['id']}/reject'><button>Reject</button></form></td></tr>" for f in facts)
         record_rows = "".join(
@@ -59,7 +60,14 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
             for record in repository.candidate_records(record_type)
         ) or "<tr><td colspan='3'>No structured profile records yet.</td></tr>"
         record_form = "<form method='post' action='/profile/records'><label>Record type <select name='record_type'><option value='experience'>Experience</option><option value='education'>Education</option><option value='certificate'>Certificate</option><option value='licence'>Licence</option><option value='language'>Language</option><option value='availability'>Availability</option></select></label> <label>Title <input name='title' required></label> <label>Details <input name='details'></label> <button>Add record</button></form>"
-        return _page("Profile", f"<section><h3>Candidate knowledge profile</h3><p>Every fact retains its source and confirmation state.</p><form method='post' action='/profile/skills'><label>Add confirmed skill <input name='skill' required></label> <button>Add skill</button></form></section><section><h3>Structured background</h3><p>Directly entered records are confirmed facts. CV-imported facts still require your review.</p>{record_form}<table><tr><th>Type</th><th>Title</th><th>Details</th></tr>{record_rows}</table></section><section><table><tr><th>Type</th><th>Value</th><th>Provenance</th><th>State</th><th>Review</th></tr>{rows}</table></section>")
+        identity_form = f"<form method='post' action='/profile/details'><label>Name <input name='name' value='{escape(candidate['name'] if candidate else '')}' required></label> <label>Email <input name='email' type='email' value='{escape(candidate.get('email', '') if candidate else '')}'></label> <label>Preferred language <select name='locale'><option value='fi'{' selected' if candidate and candidate['locale'] == 'fi' else ''}>Finnish</option><option value='en'{' selected' if not candidate or candidate['locale'] == 'en' else ''}>English</option></select></label><button>Save profile</button></form>"
+        return _page("Profile", f"<section><h3>Candidate knowledge profile</h3><p>Every fact retains its source and confirmation state.</p>{identity_form}<form method='post' action='/profile/skills'><label>Add confirmed skill <input name='skill' required></label> <button>Add skill</button></form></section><section><h3>Structured background</h3><p>Directly entered records are confirmed facts. CV-imported facts still require your review.</p>{record_form}<table><tr><th>Type</th><th>Title</th><th>Details</th></tr>{record_rows}</table></section><section><table><tr><th>Type</th><th>Value</th><th>Provenance</th><th>State</th><th>Review</th></tr>{rows}</table></section>")
+
+    @app.post("/profile/details")
+    def save_profile_details(name: str = Form(...), email: str = Form(""), locale: str = Form(...)) -> RedirectResponse:
+        if name.strip() and locale in {"fi", "en"}:
+            repository.save_profile(name.strip(), locale, email.strip())
+        return RedirectResponse("/profile", status_code=303)
 
     @app.post("/profile/skills")
     def add_skill(skill: str = Form(...)) -> RedirectResponse:

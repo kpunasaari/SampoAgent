@@ -68,6 +68,15 @@ class Repository:
     def confirmed_skills(self) -> list[str]:
         return [row[0] for row in self.connection.execute("SELECT value FROM facts WHERE type='skill' AND confirmed=1 AND rejected=0 ORDER BY value")]
 
+    def confirmed_fact_values(self) -> list[str]:
+        """Return only user-confirmed, non-rejected facts for safety decisions."""
+        return [
+            row[0]
+            for row in self.connection.execute(
+                "SELECT value FROM facts WHERE confirmed=1 AND rejected=0 ORDER BY value"
+            )
+        ]
+
     def add_candidate_record(self, record_type: str, payload: dict[str, str]) -> int:
         if record_type not in {"experience", "education", "certificate", "licence", "language", "availability", "preference", "answer_bank"}:
             raise ValueError("Unsupported candidate record type")
@@ -146,6 +155,12 @@ class Repository:
         self.log("queue_created", str(application_id))
         self.connection.commit()
         return application_id
+
+    def has_application_for_job(self, job_id: int) -> bool:
+        """Prevent a job from being prepared or submitted more than once."""
+        return self.connection.execute(
+            "SELECT 1 FROM applications WHERE job_id=? LIMIT 1", (job_id,)
+        ).fetchone() is not None
 
     def update_application_status(self, application_id: int, status: str, note: str = "") -> None:
         now = datetime.now(timezone.utc).isoformat()

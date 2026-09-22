@@ -2,13 +2,16 @@
 
 from html import escape
 from pathlib import Path
+from urllib.parse import quote
 
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import FastAPI, File, Form, Query, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from sampoagent.careers.recommendations import recommend_occupations
 from sampoagent.candidate.service import ingest_text_cv, read_cv_file
 from sampoagent.db.repository import Repository
+from sampoagent.country_packs.finland.requirements import parse_requirements
+from sampoagent.jobs.matching import hard_requirement_failures
 from sampoagent.jobs.service import normalize_job, verification_state
 from sampoagent.scoring.engine import DimensionConfig, evaluate_score
 from sampoagent.cv.service import ROLE_FAMILIES, generate_cv_pdf, validate_ats_pdf
@@ -87,27 +90,45 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
         return RedirectResponse("/sources", status_code=303)
 
     @app.get("/queue", response_class=HTMLResponse)
-    def queue() -> HTMLResponse:
+    def queue(notice: str = Query(default="")) -> HTMLResponse:
         queued = repository.rows("applications")
         rows = "".join(f"<tr><td>{item['id']}</td><td>{escape(str(item['queue_state']))}</td><td>{escape(str(item['status']))}</td></tr>" for item in queued) or "<tr><td colspan='3'>No prepared applications yet.</td></tr>"
         jobs = "".join(f"<li>{escape(str(job['title']))} — <form style='display:inline' method='post' action='/queue/prepare/{job['id']}'><button>Prepare safely</button></form></li>" for job in repository.rows("jobs"))
-        return _page("Application Queue", f"<section><p>Dry Run prevents final submission. Hard requirement failures never enter this queue.</p><h3>Eligible jobs</h3><ul>{jobs}</ul></section><section><table><tr><th>ID</th><th>Queue state</th><th>Status</th></tr>{rows}</table></section>")
+        message = f"<p class='notice' role='status'>{escape(notice)}</p>" if notice else ""
+        return _page("Application Queue", f"<section><p>Dry Run prevents final submission. Hard requirement failures and duplicate applications never enter this queue.</p>{message}<h3>Eligible jobs</h3><ul>{jobs}</ul></section><section><table><tr><th>ID</th><th>Queue state</th><th>Status</th></tr>{rows}</table></section>")
 
     @app.post("/queue/prepare/{job_id}")
     def prepare_queue(job_id: int) -> RedirectResponse:
         job = repository.job(job_id)
-        if job:
-            repository.queue_application(job_id, language=str(job["language"]), cv_path=None)
-        return RedirectResponse("/queue", status_code=303)
+        if not job:
+            return RedirectResponse("/queue?notice=" + quote("Job was not found."), status_code=303)
+        if repository.has_application_for_job(job_id):
+            return RedirectResponse("/queue?notice=" + quote("This job already has an application record."), status_code=303)
+        requirements = parse_requirements(str(job["description"]))
+        failures = hard_requirement_failures(
+            required=requirements.hard_requirements,
+            confirmed_facts=repository.confirmed_fact_values(),
+        )
+        if failures:
+            return RedirectResponse("/queue?notice=" + quote(" ".join(failures)), status_code=303)
+        repository.queue_application(job_id, language=str(job["language"]), cv_path=None)
+        return RedirectResponse("/queue?notice=" + quote("Application prepared for review. Dry Run remains enabled."), status_code=303)
 
     @app.get("/applications", response_class=HTMLResponse)
-    def applications() -> HTMLResponse:
+    def applications(notice: str = Query(default="")) -> HTMLResponse:
         rows = "".join(f"<tr><td>{item['id']}</td><td>{escape(str(item['status']))}</td><td><form method='post' action='/applications/{item['id']}/status'><select name='status'><option>APPLIED</option><option>INTERVIEW</option><option>OFFER</option><option>REJECTED</option><option>WITHDRAWN</option></select><input name='note' placeholder='Optional note'><button>Update</button></form></td></tr>" for item in repository.rows("applications")) or "<tr><td colspan='3'>No applications tracked yet.</td></tr>"
-        return _page("Applications", f"<section><p>Track status, CV used, notes, and safe submission evidence. No credentials are stored.</p><table><tr><th>ID</th><th>Status</th><th>Action</th></tr>{rows}</table></section>")
+        message = f"<p class='notice' role='status'>{escape(notice)}</p>" if notice else ""
+        return _page("Applications", f"<section><p>Track status, CV used, notes, and safe submission evidence. No credentials are stored.</p>{message}<table><tr><th>ID</th><th>Status</th><th>Action</th></tr>{rows}</table></section>")
 
     @app.post("/applications/{application_id}/status")
     def status_application(application_id: int, status: str = Form(...), note: str = Form("")) -> RedirectResponse:
-        if status in {"APPLIED", "INTERVIEW", "OFFER", "REJECTED", "WITHDRAWN", "FAILED", "NO_RESPONSE"} and repository.application(application_id):
+        application = repository.application(application_id)
+        allowed = {"APPLIED", "INTERVIEW", "OFFER", "REJECTED", "WITHDRAWN", "FAILED", "NO_RESPONSE"}
+        if status == "APPLIED" and application and application["status"] != "APPLIED":
+            daily_limit = int(repository.setting("daily_limit") or "0")
+            if not repository.can_queue_or_submit(daily_limit=daily_limit):
+                return RedirectResponse("/applications?notice=" + quote("Daily application limit reached. Status was not changed."), status_code=303)
+        if status in allowed and application:
             repository.update_application_status(application_id, status, note)
         return RedirectResponse("/applications", status_code=303)
 

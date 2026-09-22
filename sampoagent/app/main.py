@@ -403,12 +403,26 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
         return RedirectResponse("/settings?notice=" + quote("Semantic cache cleared."), status_code=303)
 
     @app.get("/cvs", response_class=HTMLResponse)
-    def cvs() -> HTMLResponse:
+    def cvs(job_id: int | None = Query(default=None)) -> HTMLResponse:
         families = "".join(f"<option value='{family}'>{family.replace('_', ' ').title()}</option>" for family in ROLE_FAMILIES)
         custom_templates = repository.cv_templates()
         template_rows = "".join(f"<tr><td>{escape(str(template['name']))}</td><td>{escape(str(template['language']))}</td><td>{escape(str(template['role_family']))}</td><td>Metadata only</td></tr>" for template in custom_templates) or "<tr><td colspan='4'>No custom template metadata registered.</td></tr>"
         template_form = f"<form method='post' action='/cvs/templates'><label>Template name <input name='name' required></label><label>Language <select name='language'><option value='fi'>Finnish</option><option value='en'>English</option></select></label><label>Role family <select name='role_family'>{families}</select></label><label>Notes <input name='notes'></label><button>Register template metadata</button></form>"
-        return _page("CVs", f"<section><p>Upload TXT, DOCX, or text-based PDF CVs. Extracted facts remain unconfirmed until reviewed. Built-in FI and EN role-family templates produce ATS-readable PDFs.</p><form method='post' action='/cvs/upload' enctype='multipart/form-data'><label>CV file <input name='file' type='file' accept='.txt,.docx,.pdf' required></label> <button>Upload and extract</button></form></section><section><h3>Generate confirmed-fact CV</h3><form method='post' action='/cvs/generate'><label>Language <select name='language'><option value='fi'>Finnish</option><option value='en'>English</option></select></label><label>Role family <select name='role_family'>{families}</select></label><label>Target company (optional) <input name='company'></label><label>Filename pattern <input name='filename_pattern' value='{{first}}_{{last}}_{{role}}_{{language}}.pdf'></label><p class='notice'>Available placeholders: first, last, fullname, role, company, language.</p><button>Generate PDF</button></form></section><section><h3>Custom template metadata</h3><p>Metadata only in V1: SampoAgent records your template preference but does not alter arbitrary DOCX layouts.</p>{template_form}<table><tr><th>Name</th><th>Language</th><th>Role family</th><th>Support</th></tr>{template_rows}</table></section>")
+        selected_job = repository.job(job_id) if job_id is not None else None
+        profile = repository.profile() or {}
+        selected_language = str(selected_job["language"] if selected_job else profile.get("locale", "en"))
+        if selected_language not in {"fi", "en"}:
+            selected_language = "en"
+        language_options = "".join(
+            f"<option value='{language}'{' selected' if language == selected_language else ''}>{label}</option>"
+            for language, label in (("fi", "Finnish"), ("en", "English"))
+        )
+        job_context = (
+            f"<p class='notice'>Generate for job: {escape(str(selected_job['company']))} — {escape(str(selected_job['title']))}. The job language selected the template language; you may still change it.</p><input type='hidden' name='job_id' value='{selected_job['id']}'>"
+            if selected_job
+            else ""
+        )
+        return _page("CVs", f"<section><p>Upload TXT, DOCX, or text-based PDF CVs. Extracted facts remain unconfirmed until reviewed. Built-in FI and EN role-family templates produce ATS-readable PDFs.</p><form method='post' action='/cvs/upload' enctype='multipart/form-data'><label>CV file <input name='file' type='file' accept='.txt,.docx,.pdf' required></label> <button>Upload and extract</button></form></section><section><h3>Generate confirmed-fact CV</h3><form method='post' action='/cvs/generate'>{job_context}<label>Language <select name='language'>{language_options}</select></label><label>Role family <select name='role_family'>{families}</select></label><label>Target company (optional) <input name='company' value='{escape(str(selected_job['company'])) if selected_job else ''}'></label><label>Filename pattern <input name='filename_pattern' value='{{first}}_{{last}}_{{role}}_{{language}}.pdf'></label><p class='notice'>Available placeholders: first, last, fullname, role, company, language.</p><button>Generate PDF</button></form></section><section><h3>Custom template metadata</h3><p>Metadata only in V1: SampoAgent records your template preference but does not alter arbitrary DOCX layouts.</p>{template_form}<table><tr><th>Name</th><th>Language</th><th>Role family</th><th>Support</th></tr>{template_rows}</table></section>")
 
     @app.post("/cvs/templates")
     def register_cv_template(name: str = Form(...), language: str = Form(...), role_family: str = Form(...), notes: str = Form("")) -> RedirectResponse:

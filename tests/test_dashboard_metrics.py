@@ -8,4 +8,5 @@ def test_dashboard_shows_actual_applied_today_count() -> None:
 
     response = client.get("/")
 
-    assert "1 / 5<small> Applied today / daily limit</small>" in response.text
+    assert "Applied today / daily limit" in response.text
+    assert "<strong>1 / 5</strong>" in response.text

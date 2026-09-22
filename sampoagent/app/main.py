@@ -53,7 +53,7 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
     def profile() -> HTMLResponse:
         candidate = repository.profile()
         facts = repository.rows("facts")
-        rows = "".join(f"<tr><td>{escape(str(f['type']))}</td><td>{escape(str(f['value']))}</td><td>{escape(str(f['provenance']))}</td><td>{'Rejected' if f['rejected'] else ('Confirmed' if f['confirmed'] else 'Review needed')}</td><td><form style='display:inline' method='post' action='/profile/facts/{f['id']}/confirm'><button>Confirm</button></form> <form style='display:inline' method='post' action='/profile/facts/{f['id']}/reject'><button>Reject</button></form></td></tr>" for f in facts)
+        rows = "".join(f"<tr><td>{escape(str(f['type']))}</td><td>{escape(str(f['value']))}</td><td>{escape(str(f['provenance']))}</td><td>{'Rejected' if f['rejected'] else ('Confirmed' if f['confirmed'] else 'Review needed')}</td><td><form style='display:inline' method='post' action='/profile/facts/{f['id']}/confirm'><button>Confirm</button></form> <form style='display:inline' method='post' action='/profile/facts/{f['id']}/reject'><button>Reject</button></form> <form style='display:inline' method='post' action='/profile/facts/{f['id']}/edit'><input name='value' value='{escape(str(f['value']))}' required><button>Correct</button></form></td></tr>" for f in facts)
         record_rows = "".join(
             f"<tr><td>{escape(record_type.title())}</td><td>{escape(str(record.get('title', '')))}</td><td>{escape(str(record.get('details', '')))}</td></tr>"
             for record_type in ("experience", "education", "certificate", "licence", "language", "availability")
@@ -90,6 +90,12 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
     @app.post("/profile/facts/{fact_id}/reject")
     def reject_profile_fact(fact_id: int) -> RedirectResponse:
         repository.reject_fact(fact_id)
+        return RedirectResponse("/profile", status_code=303)
+
+    @app.post("/profile/facts/{fact_id}/edit")
+    def edit_profile_fact(fact_id: int, value: str = Form(...)) -> RedirectResponse:
+        if value.strip():
+            repository.edit_fact(fact_id, value)
         return RedirectResponse("/profile", status_code=303)
 
     @app.get("/careers", response_class=HTMLResponse)

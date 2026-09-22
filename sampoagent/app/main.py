@@ -7,6 +7,8 @@ from urllib.parse import quote
 from fastapi import FastAPI, File, Form, Query, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
+from sampoagent.applications.answers import save_answer
+from sampoagent.applications.workflow import classify_question
 from sampoagent.careers.recommendations import recommend_occupations
 from sampoagent.candidate.service import ingest_text_cv, read_cv_file
 from sampoagent.country_packs.finland import builtin_sources
@@ -19,7 +21,7 @@ from sampoagent.scoring.job_score import dump_configs, evaluate_job, load_config
 from sampoagent.cv.service import ROLE_FAMILIES, generate_cv_pdf, validate_ats_pdf
 
 
-NAVIGATION = [("Dashboard", "/"), ("Profile", "/profile"), ("Career Suggestions", "/careers"), ("CVs", "/cvs"), ("Jobs", "/jobs"), ("Sources", "/sources"), ("Application Queue", "/queue"), ("Applications", "/applications"), ("Analytics", "/analytics"), ("Agent", "/agent"), ("Settings", "/settings")]
+NAVIGATION = [("Dashboard", "/"), ("Profile", "/profile"), ("Career Suggestions", "/careers"), ("CVs", "/cvs"), ("Jobs", "/jobs"), ("Sources", "/sources"), ("Application Queue", "/queue"), ("Applications", "/applications"), ("Answer Bank", "/answers"), ("Analytics", "/analytics"), ("Agent", "/agent"), ("Settings", "/settings")]
 
 
 def _page(title: str, body: str) -> HTMLResponse:
@@ -206,6 +208,21 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
         if status in allowed and application:
             repository.update_application_status(application_id, status, note)
         return RedirectResponse("/applications", status_code=303)
+
+    @app.get("/answers", response_class=HTMLResponse)
+    def answers() -> HTMLResponse:
+        rows = "".join(
+            f"<tr><td>{escape(str(answer['category']))}</td><td>{escape(str(answer['question']))}</td><td>{escape(str(answer['value']))}</td><td>{escape(str(answer['source']))}</td><td>{escape(classify_question(str(answer['question'])))}</td></tr>"
+            for answer in repository.answers()
+        ) or "<tr><td colspan='5'>No saved answers yet.</td></tr>"
+        form = "<form method='post' action='/answers'><label>Category <select name='category'><option value='FACT'>Fact</option><option value='PREFERENCE'>Preference</option><option value='MOTIVATION'>Motivation</option></select></label> <label>Question <input name='question' required></label> <label>Answer <input name='value' required></label> <label>Source <select name='source'><option value='USER_CONFIRMED'>User confirmed</option><option value='AI_GENERATED'>AI generated draft</option></select></label><button>Save answer</button></form>"
+        return _page("Answer Bank", f"<section><p>High-risk questions always require your intervention. A user-confirmed factual answer cannot be overwritten by generated text.</p>{form}<table><tr><th>Category</th><th>Question</th><th>Answer</th><th>Source</th><th>Risk</th></tr>{rows}</table></section>")
+
+    @app.post("/answers")
+    def add_answer(category: str = Form(...), question: str = Form(...), value: str = Form(...), source: str = Form(...)) -> RedirectResponse:
+        if category in {"FACT", "PREFERENCE", "MOTIVATION"} and source in {"USER_CONFIRMED", "AI_GENERATED"} and question.strip() and value.strip():
+            save_answer(repository, category=category, question=question.strip(), value=value.strip(), source=source)
+        return RedirectResponse("/answers", status_code=303)
 
     @app.get("/analytics", response_class=HTMLResponse)
     def analytics() -> HTMLResponse:

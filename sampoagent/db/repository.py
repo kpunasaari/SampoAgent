@@ -210,6 +210,14 @@ class Repository:
         row = self.connection.execute("SELECT * FROM answer_bank WHERE id=?", (answer_id,)).fetchone()
         return dict(row) if row else None
 
+    def answers(self) -> list[dict[str, object]]:
+        return [
+            dict(row)
+            for row in self.connection.execute(
+                "SELECT * FROM answer_bank ORDER BY id DESC"
+            )
+        ]
+
     def update_answer(self, answer_id: int, category: str, question: str, value: str, source: str) -> None:
         self.connection.execute("UPDATE answer_bank SET category=?, question=?, value=?, source=? WHERE id=?", (category, question, value, source, answer_id))
         self.connection.commit()

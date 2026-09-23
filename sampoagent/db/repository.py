@@ -40,7 +40,38 @@ class Repository:
         columns = {row[1] for row in self.connection.execute("PRAGMA table_info(job_sources)")}
         if "notes" not in columns:
             self.connection.execute("ALTER TABLE job_sources ADD COLUMN notes TEXT NOT NULL DEFAULT ''")
+        for key, value in {
+            "application_mode": "review_everything",
+            "daily_limit": "0",
+            "ai_usage_mode": "minimal",
+            "dry_run": "true",
+        }.items():
+            self.connection.execute(
+                "INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)", (key, value)
+            )
+        self.seed_builtin_sources()
         self.connection.commit()
+
+    def seed_builtin_sources(self) -> None:
+        """Insert the country-pack catalog without changing existing source choices."""
+        from sampoagent.country_packs.finland import builtin_sources
+
+        for source in builtin_sources():
+            exists = self.connection.execute(
+                "SELECT 1 FROM job_sources WHERE url=? LIMIT 1", (source.url,)
+            ).fetchone()
+            if not exists:
+                self.connection.execute(
+                    "INSERT INTO job_sources(name, url, country, source_type, notes, enabled, capability) VALUES (?, ?, ?, ?, ?, 1, ?)",
+                    (
+                        source.name,
+                        source.url,
+                        "Finland",
+                        source.source_type,
+                        "Bundled Finland source; capability is shown honestly and can be changed by the user.",
+                        source.capability,
+                    ),
+                )
 
     def load_demo(self) -> None:
         if self.profile():
@@ -48,12 +79,13 @@ class Repository:
         self.connection.execute("INSERT INTO candidate_profile(id, name, email, locale) VALUES(1, ?, ?, ?)", ("Aino Example", "aino@example.test", "en"))
         self.connection.executemany("INSERT INTO facts(type, value, provenance, source_id, confidence, confirmed) VALUES (?, ?, 'USER_CONFIRMED', 'demo', 1, 1)", [("skill", "forklift operation"), ("skill", "customer service"), ("language", "Finnish"), ("language", "English")])
         self.connection.executemany("INSERT INTO career_profiles(name, notes) VALUES (?, ?)", [("Logistics", "Synthetic demo career profile"), ("Customer Service", "Synthetic demo career profile")])
-        sources = [("Duunitori", "https://duunitori.fi", "Finland", "job board", "Browser search only"), ("Työmarkkinatori", "https://tyomarkkinatori.fi", "Finland", "public-sector board", "Browser search only"), ("Kuntarekry", "https://kuntarekry.fi", "Finland", "public-sector board", "Browser search only")]
-        self.connection.executemany("INSERT INTO job_sources(name, url, country, source_type, capability) VALUES (?, ?, ?, ?, ?)", sources)
         jobs = [("Warehouse Worker", "Northern Logistics Oy", "Vantaa", "en", "Synthetic demo: forklift operation and Finnish required.", "https://example.test/apply/warehouse", "demo-warehouse", "VERIFIED"), ("Asiakaspalvelija", "Example Services Oy", "Helsinki", "fi", "Synteettinen demo: asiakaspalvelu ja englanti.", "https://example.test/apply/service", "demo-service", "PARTIALLY_VERIFIED")]
         self.connection.executemany("INSERT INTO jobs(title, company, location, language, description, application_url, fingerprint, verification_state) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", jobs)
         for key, value in {"application_mode": "review_everything", "daily_limit": "5", "ai_usage_mode": "minimal", "dry_run": "true"}.items():
-            self.connection.execute("INSERT INTO settings(key, value) VALUES (?, ?)", (key, value))
+            self.connection.execute(
+                "INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, value),
+            )
         self.log("demo_loaded", "Synthetic demo data loaded")
         self.connection.commit()
 

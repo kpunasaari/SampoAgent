@@ -10,7 +10,6 @@ It is a local-first job search agent, ATS CV/resume tailoring tool, job applicat
 py -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -e .
-sampoagent demo
 sampoagent run
 ```
 
@@ -18,15 +17,18 @@ Open [http://127.0.0.1:8765](http://127.0.0.1:8765). The service intentionally b
 
 ## First-run workflow
 
-1. Review the synthetic demo or enter your own profile.
+1. Enter your own profile; a clean install never inserts a fictional candidate or job.
 2. Upload a text CV and review all extracted facts before using them.
-3. Add confirmed skills; SampoAgent recommends roles without auto-selecting them.
-4. Configure sources, thresholds, daily application limit, and application mode.
-5. Start in Dry Run; it never makes final submissions.
+3. Confirm skills and experience; SampoAgent recommends roles but never activates them without your choice.
+4. Use the Finland source catalog, then find matching jobs based on your confirmed profile and locations.
+5. Configure thresholds, daily application limit, email connection, and application mode.
+6. Start in Dry Run; it never makes final submissions.
+
+To preview clearly synthetic example data instead, run `sampoagent demo` once before `sampoagent run`.
 
 ## Current V1 scope
 
-- Finland country pack with built-in source metadata; source access is browser-only unless a compliant adapter is added.
+- Finland country pack with a built-in source catalog. Each source is labeled with its real discovery capability; protected sources remain browser-only.
 - Separate Finnish and English CV labels and template selection.
 - Deterministic matching, duplicate detection, language detection, hard blockers, explainable three-part scoring.
 - Confirmed-fact-only PDF CV output and ATS text re-parse validation.

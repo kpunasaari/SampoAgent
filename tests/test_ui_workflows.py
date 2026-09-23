@@ -6,7 +6,7 @@ from sampoagent.app.main import create_app
 
 
 def test_profile_and_queue_keep_their_existing_form_contracts() -> None:
-    client = TestClient(create_app(database_path=":memory:"))
+    client = TestClient(create_app(database_path=":memory:", demo_data=True))
 
     profile = client.get("/profile")
     queue = client.get("/queue")
@@ -48,7 +48,7 @@ def test_settings_groups_controls_without_changing_the_form_endpoint() -> None:
 
 
 def test_cv_page_keeps_generation_and_download_workflow_visible(tmp_path: Path) -> None:
-    app = create_app(database_path=tmp_path / "agent.db")
+    app = create_app(database_path=tmp_path / "agent.db", demo_data=True)
     client = TestClient(app)
 
     page = client.get("/cvs?job_id=2")

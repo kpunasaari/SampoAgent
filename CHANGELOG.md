@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- New installations now start with an honest empty candidate workspace and safe defaults; synthetic demo data is opt-in, while the Finland source catalog is seeded automatically.
 - Added a responsive dark application shell with a persistent sidebar and
   keyboard-visible navigation state.
 - Reworked the dashboard into an action-oriented safety overview with metric

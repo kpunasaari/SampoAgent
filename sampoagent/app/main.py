@@ -49,10 +49,11 @@ def _status(text: str, tone: str) -> str:
     return f'<span class="status status-{escape(tone)}">{escape(text)}</span>'
 
 
-def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
+def create_app(database_path: str | Path = "sampoagent.db", *, demo_data: bool = False) -> FastAPI:
     repository = Repository(database_path)
     repository.initialize()
-    repository.load_demo()
+    if demo_data:
+        repository.load_demo()
     app = FastAPI(title="SampoAgent", docs_url=None, redoc_url=None)
     app.state.repository = repository
 
@@ -79,10 +80,16 @@ def create_app(database_path: str | Path = "sampoagent.db") -> FastAPI:
             f"<li>{escape(str(item['action']).replace('_', ' ').title())}: {escape(str(item['details']))}</li>"
             for item in repository.recent_activity(5)
         ) or "<li>No activity yet.</li>"
+        if repository.profile() is None:
+            next_step = "Create your profile and upload a CV. SampoAgent will suggest job searches from confirmed experience and skills."
+            primary_action = '<a class="nav-link active" href="/onboarding">Set up your career workspace</a>'
+        else:
+            next_step = "Review confirmed facts, choose the roles that fit you, then find matching jobs in one step."
+            primary_action = '<a class="nav-link active" href="/jobs">Find matching jobs</a>'
         body = f"""
 <section class="dashboard-hero"><span class="status status-review">Dry Run is on</span><h2>Build momentum without giving up control.</h2><p>Your data stays local. Nothing is submitted until you deliberately move beyond review.</p></section>
 <section class="metric-grid">{card_markup}</section>
-<div class="content-grid"><section class="panel"><h3>What to do next</h3><p class="next-step">Review confirmed facts, choose target occupations, then prepare your first application in Dry Run.</p><a class="nav-link active" href="/profile">Review my profile</a></section><section class="panel"><h3>Recent activity</h3><ul class="activity-list">{activity}</ul></section></div>"""
+<div class="content-grid"><section class="panel"><h3>What to do next</h3><p class="next-step">{escape(next_step)}</p>{primary_action}</section><section class="panel"><h3>Recent activity</h3><ul class="activity-list">{activity}</ul></section></div>"""
         return _page("Dashboard", body, path="/")
 
     @app.get("/profile", response_class=HTMLResponse)

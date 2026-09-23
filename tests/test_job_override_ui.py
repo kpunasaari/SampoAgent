@@ -2,7 +2,7 @@ def test_user_can_override_low_score_for_review_but_not_hard_requirements() -> N
     from fastapi.testclient import TestClient
     from sampoagent.app.main import create_app
 
-    client = TestClient(create_app(database_path=":memory:"))
+    client = TestClient(create_app(database_path=":memory:", demo_data=True))
     client.post(
         "/jobs/import",
         data={
@@ -25,7 +25,7 @@ def test_override_cannot_bypass_explicit_hard_requirement() -> None:
     from fastapi.testclient import TestClient
     from sampoagent.app.main import create_app
 
-    client = TestClient(create_app(database_path=":memory:"))
+    client = TestClient(create_app(database_path=":memory:", demo_data=True))
     client.post(
         "/jobs/import",
         data={

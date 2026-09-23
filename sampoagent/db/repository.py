@@ -24,7 +24,7 @@ class Repository:
             CREATE TABLE IF NOT EXISTS career_profiles (id INTEGER PRIMARY KEY, name TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, notes TEXT NOT NULL DEFAULT '');
             CREATE TABLE IF NOT EXISTS target_occupations (id INTEGER PRIMARY KEY, title_en TEXT NOT NULL, title_fi TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, UNIQUE(title_en, title_fi));
             CREATE TABLE IF NOT EXISTS job_sources (id INTEGER PRIMARY KEY, name TEXT NOT NULL, url TEXT NOT NULL, country TEXT NOT NULL, source_type TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1, capability TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS jobs (id INTEGER PRIMARY KEY, title TEXT NOT NULL, company TEXT NOT NULL, location TEXT, language TEXT NOT NULL, description TEXT NOT NULL, application_url TEXT NOT NULL, fingerprint TEXT UNIQUE NOT NULL, verification_state TEXT NOT NULL, deadline TEXT);
+            CREATE TABLE IF NOT EXISTS jobs (id INTEGER PRIMARY KEY, title TEXT NOT NULL, company TEXT NOT NULL, location TEXT, language TEXT NOT NULL, description TEXT NOT NULL, application_url TEXT NOT NULL, fingerprint TEXT UNIQUE NOT NULL, verification_state TEXT NOT NULL, deadline TEXT, source_id INTEGER, source_name TEXT NOT NULL DEFAULT '', source_url TEXT NOT NULL DEFAULT '');
             CREATE TABLE IF NOT EXISTS job_overrides (job_id INTEGER PRIMARY KEY, decision TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, FOREIGN KEY(job_id) REFERENCES jobs(id));
             CREATE TABLE IF NOT EXISTS applications (id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL, status TEXT NOT NULL, queue_state TEXT NOT NULL, language TEXT NOT NULL, cv_path TEXT, notes TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(job_id) REFERENCES jobs(id));
             CREATE TABLE IF NOT EXISTS submission_evidence (id INTEGER PRIMARY KEY, application_id INTEGER NOT NULL, final_url TEXT NOT NULL, confirmation_message TEXT NOT NULL, confirmation_id TEXT, agent_provider TEXT NOT NULL, created_at TEXT NOT NULL);
@@ -35,11 +35,21 @@ class Repository:
             CREATE TABLE IF NOT EXISTS semantic_cache (cache_key TEXT PRIMARY KEY, value TEXT NOT NULL, created_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS ai_usage (id INTEGER PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, feature TEXT NOT NULL, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, cached_tokens INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS documents (id INTEGER PRIMARY KEY, kind TEXT NOT NULL, path TEXT NOT NULL, checksum TEXT, created_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS discovery_runs (id INTEGER PRIMARY KEY, started_at TEXT NOT NULL, finished_at TEXT, status TEXT NOT NULL, query_count INTEGER NOT NULL DEFAULT 0, jobs_found INTEGER NOT NULL DEFAULT 0, imported_count INTEGER NOT NULL DEFAULT 0, duplicates_count INTEGER NOT NULL DEFAULT 0, summary TEXT NOT NULL DEFAULT '');
+            CREATE TABLE IF NOT EXISTS discovery_source_results (id INTEGER PRIMARY KEY, run_id INTEGER NOT NULL, source_id INTEGER, source_name TEXT NOT NULL, source_url TEXT NOT NULL, capability TEXT NOT NULL, status TEXT NOT NULL, jobs_found INTEGER NOT NULL DEFAULT 0, imported_count INTEGER NOT NULL DEFAULT 0, duplicates_count INTEGER NOT NULL DEFAULT 0, message TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, FOREIGN KEY(run_id) REFERENCES discovery_runs(id) ON DELETE CASCADE);
             """
         )
         columns = {row[1] for row in self.connection.execute("PRAGMA table_info(job_sources)")}
         if "notes" not in columns:
             self.connection.execute("ALTER TABLE job_sources ADD COLUMN notes TEXT NOT NULL DEFAULT ''")
+        job_columns = {row[1] for row in self.connection.execute("PRAGMA table_info(jobs)")}
+        for name, declaration in (
+            ("source_id", "INTEGER"),
+            ("source_name", "TEXT NOT NULL DEFAULT ''"),
+            ("source_url", "TEXT NOT NULL DEFAULT ''"),
+        ):
+            if name not in job_columns:
+                self.connection.execute(f"ALTER TABLE jobs ADD COLUMN {name} {declaration}")
         for key, value in {
             "application_mode": "review_everything",
             "daily_limit": "0",
@@ -252,12 +262,114 @@ class Repository:
     def add_job(self, job: object, verification: str) -> int | None:
         """Persist a normalized job once; return None when its fingerprint already exists."""
         try:
-            cursor = self.connection.execute("INSERT INTO jobs(title, company, location, language, description, application_url, fingerprint, verification_state) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (job.title, job.company, job.location, job.language, job.description, job.application_url, job.fingerprint, verification))
+            cursor = self.connection.execute(
+                "INSERT INTO jobs(title, company, location, language, description, application_url, fingerprint, verification_state, source_id, source_name, source_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    job.title,
+                    job.company,
+                    job.location,
+                    job.language,
+                    job.description,
+                    job.application_url,
+                    job.fingerprint,
+                    verification,
+                    getattr(job, "source_id", None),
+                    getattr(job, "source_name", ""),
+                    getattr(job, "source_url", ""),
+                ),
+            )
         except sqlite3.IntegrityError:
             return None
         self.log("job_imported", job.title)
         self.connection.commit()
         return int(cursor.lastrowid)
+
+    def create_discovery_run(self, *, query_count: int) -> int:
+        if query_count < 0:
+            raise ValueError("Query count cannot be negative")
+        cursor = self.connection.execute(
+            "INSERT INTO discovery_runs(started_at, status, query_count) VALUES (?, 'running', ?)",
+            (datetime.now(timezone.utc).isoformat(), query_count),
+        )
+        self.connection.commit()
+        return int(cursor.lastrowid)
+
+    def record_discovery_source_result(
+        self,
+        run_id: int,
+        *,
+        source_id: int | None,
+        source_name: str,
+        source_url: str,
+        capability: str,
+        status: str,
+        jobs_found: int = 0,
+        imported_count: int = 0,
+        duplicates_count: int = 0,
+        message: str = "",
+    ) -> int:
+        counts = (jobs_found, imported_count, duplicates_count)
+        if any(count < 0 for count in counts):
+            raise ValueError("Discovery result counts cannot be negative")
+        cursor = self.connection.execute(
+            "INSERT INTO discovery_source_results(run_id, source_id, source_name, source_url, capability, status, jobs_found, imported_count, duplicates_count, message, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                run_id,
+                source_id,
+                source_name,
+                source_url,
+                capability,
+                status,
+                jobs_found,
+                imported_count,
+                duplicates_count,
+                message,
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        self.connection.commit()
+        return int(cursor.lastrowid)
+
+    def complete_discovery_run(
+        self,
+        run_id: int,
+        *,
+        status: str,
+        jobs_found: int,
+        imported_count: int,
+        duplicates_count: int,
+        summary: str,
+    ) -> None:
+        if status not in {"completed", "partial", "failed"}:
+            raise ValueError("Unsupported discovery run status")
+        if min(jobs_found, imported_count, duplicates_count) < 0:
+            raise ValueError("Discovery run counts cannot be negative")
+        self.connection.execute(
+            "UPDATE discovery_runs SET finished_at=?, status=?, jobs_found=?, imported_count=?, duplicates_count=?, summary=? WHERE id=?",
+            (
+                datetime.now(timezone.utc).isoformat(),
+                status,
+                jobs_found,
+                imported_count,
+                duplicates_count,
+                summary,
+                run_id,
+            ),
+        )
+        self.connection.commit()
+
+    def latest_discovery_run(self) -> dict[str, object] | None:
+        row = self.connection.execute("SELECT * FROM discovery_runs ORDER BY id DESC LIMIT 1").fetchone()
+        return dict(row) if row else None
+
+    def discovery_source_results(self, run_id: int) -> list[dict[str, object]]:
+        return [
+            dict(row)
+            for row in self.connection.execute(
+                "SELECT * FROM discovery_source_results WHERE run_id=? ORDER BY id",
+                (run_id,),
+            )
+        ]
 
     def queue_application(self, job_id: int, *, language: str, cv_path: str | None) -> int:
         now = datetime.now(timezone.utc).isoformat()

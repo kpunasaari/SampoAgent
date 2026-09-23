@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import sqlite3
 import json
+from urllib.parse import urlsplit
 
 
 class Repository:
@@ -37,6 +38,8 @@ class Repository:
             CREATE TABLE IF NOT EXISTS documents (id INTEGER PRIMARY KEY, kind TEXT NOT NULL, path TEXT NOT NULL, checksum TEXT, created_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS discovery_runs (id INTEGER PRIMARY KEY, started_at TEXT NOT NULL, finished_at TEXT, status TEXT NOT NULL, query_count INTEGER NOT NULL DEFAULT 0, jobs_found INTEGER NOT NULL DEFAULT 0, imported_count INTEGER NOT NULL DEFAULT 0, duplicates_count INTEGER NOT NULL DEFAULT 0, summary TEXT NOT NULL DEFAULT '');
             CREATE TABLE IF NOT EXISTS discovery_source_results (id INTEGER PRIMARY KEY, run_id INTEGER NOT NULL, source_id INTEGER, source_name TEXT NOT NULL, source_url TEXT NOT NULL, capability TEXT NOT NULL, status TEXT NOT NULL, jobs_found INTEGER NOT NULL DEFAULT 0, imported_count INTEGER NOT NULL DEFAULT 0, duplicates_count INTEGER NOT NULL DEFAULT 0, message TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, FOREIGN KEY(run_id) REFERENCES discovery_runs(id) ON DELETE CASCADE);
+            CREATE TABLE IF NOT EXISTS mailbox_connection (id INTEGER PRIMARY KEY CHECK(id=1), provider TEXT NOT NULL, token_ciphertext TEXT NOT NULL, connected_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS mailbox_messages (id INTEGER PRIMARY KEY, provider TEXT NOT NULL, provider_message_id TEXT NOT NULL, sender TEXT NOT NULL, subject TEXT NOT NULL, snippet TEXT NOT NULL, received_at TEXT NOT NULL, link TEXT NOT NULL, reviewed INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, UNIQUE(provider, provider_message_id));
             """
         )
         columns = {row[1] for row in self.connection.execute("PRAGMA table_info(job_sources)")}
@@ -59,11 +62,30 @@ class Repository:
             self.connection.execute(
                 "INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)", (key, value)
             )
+        self.migrate_unambiguous_candidate_fact_links()
         self.seed_builtin_sources()
         self.connection.commit()
 
+    def migrate_unambiguous_candidate_fact_links(self) -> None:
+        """Associate legacy UI-derived facts only when record/fact matching is one-to-one."""
+        records = self.connection.execute("SELECT id, record_type, payload FROM candidate_records ORDER BY id").fetchall()
+        for record in records:
+            title = str(json.loads(record[2]).get("title", "")).strip()
+            if not title:
+                continue
+            linked_source = f"candidate_record:{int(record[0])}"
+            if self.connection.execute("SELECT 1 FROM facts WHERE source_id=? LIMIT 1", (linked_source,)).fetchone():
+                continue
+            params = (record[1], title)
+            record_count = int(self.connection.execute("SELECT COUNT(*) FROM candidate_records WHERE record_type=? AND json_extract(payload, '$.title')=?", params).fetchone()[0])
+            facts = self.connection.execute("SELECT id FROM facts WHERE type=? AND value=? AND provenance='USER_CONFIRMED' AND source_id='profile'", params).fetchall()
+            if record_count == 1 and len(facts) == 1:
+                self.connection.execute("UPDATE facts SET source_id=? WHERE id=?", (linked_source, int(facts[0][0])))
+
     def seed_builtin_sources(self) -> None:
         """Insert the country-pack catalog without changing existing source choices."""
+        if self.setting("builtin_sources_seeded") == "true":
+            return
         from sampoagent.country_packs.finland import builtin_sources
 
         for source in builtin_sources():
@@ -82,6 +104,10 @@ class Repository:
                         source.capability,
                     ),
                 )
+        self.connection.execute(
+            "INSERT INTO settings(key, value) VALUES ('builtin_sources_seeded', 'true') "
+            "ON CONFLICT(key) DO UPDATE SET value='true'"
+        )
 
     def load_demo(self) -> None:
         if self.profile():
@@ -135,6 +161,34 @@ class Repository:
         rows = self.connection.execute("SELECT payload FROM candidate_records WHERE record_type=? ORDER BY id DESC", (record_type,))
         return [json.loads(row[0]) for row in rows]
 
+    def candidate_record_rows(self, record_type: str) -> list[dict[str, object]]:
+        rows = self.connection.execute("SELECT id, payload FROM candidate_records WHERE record_type=? ORDER BY id DESC", (record_type,))
+        return [{"id": int(row[0]), **json.loads(row[1])} for row in rows]
+
+    def update_candidate_record(self, record_id: int, *, title: str, details: str) -> None:
+        row = self.connection.execute("SELECT record_type, payload FROM candidate_records WHERE id=?", (record_id,)).fetchone()
+        if not row or not title.strip():
+            raise ValueError("Candidate record was not found or the title is empty")
+        payload = json.loads(row[1])
+        old_title = str(payload.get("title", ""))
+        payload.update({"title": title.strip(), "details": details.strip()})
+        self.connection.execute("UPDATE candidate_records SET payload=? WHERE id=?", (json.dumps(payload, ensure_ascii=False), record_id))
+        source = f"candidate_record:{record_id}"
+        fact = self.connection.execute("SELECT id FROM facts WHERE type=? AND value=? AND provenance='USER_CONFIRMED' AND source_id=? ORDER BY id DESC LIMIT 1", (row[0], old_title, source)).fetchone()
+        if fact:
+            self.connection.execute("UPDATE facts SET value=? WHERE id=?", (title.strip(), int(fact[0])))
+        self.log("candidate_record_updated", str(record_id))
+        self.connection.commit()
+
+    def delete_candidate_record(self, record_id: int) -> None:
+        row = self.connection.execute("SELECT record_type, payload FROM candidate_records WHERE id=?", (record_id,)).fetchone()
+        if row:
+            value = str(json.loads(row[1]).get("title", ""))
+            self.connection.execute("DELETE FROM facts WHERE type=? AND provenance='USER_CONFIRMED' AND source_id=?", (row[0], f"candidate_record:{record_id}"))
+            self.connection.execute("DELETE FROM candidate_records WHERE id=?", (record_id,))
+        self.log("candidate_record_deleted", str(record_id))
+        self.connection.commit()
+
     def add_cv_template(self, *, name: str, language: str, role_family: str, notes: str = "") -> int:
         if language not in {"fi", "en"}:
             raise ValueError("Unsupported template language")
@@ -167,6 +221,13 @@ class Repository:
     def delete_career_profile(self, profile_id: int) -> None:
         self.connection.execute("DELETE FROM career_profiles WHERE id=?", (profile_id,))
         self.log("career_profile_deleted", str(profile_id))
+        self.connection.commit()
+
+    def update_career_profile(self, profile_id: int, *, name: str, notes: str) -> None:
+        if not name.strip():
+            raise ValueError("Career profile name is required")
+        self.connection.execute("UPDATE career_profiles SET name=?, notes=? WHERE id=?", (name.strip(), notes.strip(), profile_id))
+        self.log("career_profile_updated", str(profile_id))
         self.connection.commit()
 
     def add_target_occupation(self, title_en: str, title_fi: str) -> int:
@@ -211,6 +272,11 @@ class Repository:
             "UPDATE target_occupations SET enabled=? WHERE id=?", (int(enabled), target_id)
         )
         self.log("target_occupation_enabled", str(target_id))
+        self.connection.commit()
+
+    def delete_target_occupation(self, target_id: int) -> None:
+        self.connection.execute("DELETE FROM target_occupations WHERE id=?", (target_id,))
+        self.log("target_occupation_deleted", str(target_id))
         self.connection.commit()
 
     def add_skill(self, value: str) -> None:
@@ -263,7 +329,7 @@ class Repository:
         """Persist a normalized job once; return None when its fingerprint already exists."""
         try:
             cursor = self.connection.execute(
-                "INSERT INTO jobs(title, company, location, language, description, application_url, fingerprint, verification_state, source_id, source_name, source_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO jobs(title, company, location, language, description, application_url, fingerprint, verification_state, deadline, source_id, source_name, source_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     job.title,
                     job.company,
@@ -273,6 +339,7 @@ class Repository:
                     job.application_url,
                     job.fingerprint,
                     verification,
+                    getattr(job, "deadline", None).isoformat() if getattr(job, "deadline", None) else None,
                     getattr(job, "source_id", None),
                     getattr(job, "source_name", ""),
                     getattr(job, "source_url", ""),
@@ -370,6 +437,56 @@ class Repository:
                 (run_id,),
             )
         ]
+
+    def mailbox_connection(self) -> dict[str, object] | None:
+        row = self.connection.execute("SELECT id, provider, connected_at FROM mailbox_connection WHERE id=1").fetchone()
+        return dict(row) if row else None
+
+    def mailbox_ciphertext(self) -> str | None:
+        row = self.connection.execute("SELECT token_ciphertext FROM mailbox_connection WHERE id=1").fetchone()
+        return str(row[0]) if row else None
+
+    def save_mailbox_connection(self, provider: str, token_ciphertext: str) -> None:
+        if provider not in {"gmail", "microsoft"} or not token_ciphertext.strip():
+            raise ValueError("A supported provider and encrypted token payload are required")
+        self.connection.execute(
+            "INSERT INTO mailbox_connection(id, provider, token_ciphertext, connected_at) VALUES(1, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET provider=excluded.provider, token_ciphertext=excluded.token_ciphertext, connected_at=excluded.connected_at",
+            (provider, token_ciphertext, datetime.now(timezone.utc).isoformat()),
+        )
+        self.log("mailbox_connected", provider)
+        self.connection.commit()
+
+    def remove_mailbox_connection(self) -> None:
+        self.connection.execute("DELETE FROM mailbox_connection WHERE id=1")
+        self.connection.execute("DELETE FROM mailbox_messages")
+        self.log("mailbox_disconnected", "Mailbox tokens and synced message metadata removed")
+        self.connection.commit()
+
+    def store_mailbox_messages(self, provider: str, messages: list[object]) -> int:
+        stored = 0
+        for message in messages[:50]:
+            cursor = self.connection.execute(
+                "INSERT INTO mailbox_messages(provider, provider_message_id, sender, subject, snippet, received_at, link, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(provider, provider_message_id) DO UPDATE SET sender=excluded.sender, subject=excluded.subject, snippet=excluded.snippet, received_at=excluded.received_at, link=excluded.link",
+                (provider, str(message.provider_message_id)[:300], str(message.sender)[:300], str(message.subject)[:500], str(message.snippet)[:300], str(message.received_at)[:200], str(message.link)[:1000], datetime.now(timezone.utc).isoformat()),
+            )
+            stored += int(cursor.rowcount > 0)
+        self.connection.commit()
+        return stored
+
+    def mailbox_messages(self, *, include_reviewed: bool = True) -> list[dict[str, object]]:
+        sql = "SELECT * FROM mailbox_messages" + ("" if include_reviewed else " WHERE reviewed=0") + " ORDER BY received_at DESC, id DESC LIMIT 100"
+        return [dict(row) for row in self.connection.execute(sql)]
+
+    def confirm_mailbox_response(self, message_id: int, application_id: int, status: str) -> None:
+        allowed = {"APPLICATION_RECEIVED", "INTERVIEW", "ASSESSMENT", "OFFER", "REJECTED"}
+        message = self.connection.execute("SELECT * FROM mailbox_messages WHERE id=?", (message_id,)).fetchone()
+        application = self.application(application_id)
+        if status not in allowed or not message or not application:
+            raise ValueError("Select a saved message, application, and supported outcome")
+        note = f"Confirmed from email review: {message['subject']} — {message['sender']} ({message['received_at']})"
+        self.update_application_status(application_id, status, note)
+        self.connection.execute("UPDATE mailbox_messages SET reviewed=1 WHERE id=?", (message_id,))
+        self.connection.commit()
 
     def queue_application(self, job_id: int, *, language: str, cv_path: str | None) -> int:
         now = datetime.now(timezone.utc).isoformat()
@@ -539,13 +656,43 @@ class Repository:
             rows = self.connection.execute("SELECT * FROM documents WHERE kind=? ORDER BY id DESC", (kind,))
         return [dict(row) for row in rows]
 
-    def add_source(self, *, name: str, url: str, country: str, source_type: str, notes: str = "") -> int:
-        if not url.startswith(("https://", "http://")):
-            raise ValueError("Source URL must be HTTP(S)")
-        cursor = self.connection.execute("INSERT INTO job_sources(name, url, country, source_type, notes, capability) VALUES (?, ?, ?, ?, ?, 'Browser search only')", (name.strip(), url.strip(), country.strip(), source_type.strip(), notes.strip()))
+    @staticmethod
+    def _validate_source_values(*, name: str, url: str, country: str, source_type: str, capability: str) -> None:
+        parsed = urlsplit(url.strip())
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError("Source URL must be a credential-free HTTPS address")
+        if not name.strip() or not country.strip() or not source_type.strip():
+            raise ValueError("Source name, country, and type are required")
+        if capability not in {"Browser search only", "RSS/Atom feed", "JSON Feed", "Job Market Finland API"}:
+            raise ValueError("Unsupported source capability")
+        if capability == "Job Market Finland API" and parsed.hostname not in {"tyomarkkinatori.fi", "www.tyomarkkinatori.fi"}:
+            raise ValueError("The official Job Market Finland API source must use tyomarkkinatori.fi")
+
+    def add_source(self, *, name: str, url: str, country: str, source_type: str, notes: str = "", capability: str = "Browser search only") -> int:
+        clean_url = url.strip()
+        self._validate_source_values(name=name, url=clean_url, country=country, source_type=source_type, capability=capability)
+        if self.has_source_url(clean_url):
+            raise ValueError("A source with this URL already exists")
+        cursor = self.connection.execute("INSERT INTO job_sources(name, url, country, source_type, notes, capability) VALUES (?, ?, ?, ?, ?, ?)", (name.strip(), clean_url, country.strip(), source_type.strip(), notes.strip(), capability))
         self.log("source_added", name)
         self.connection.commit()
         return int(cursor.lastrowid)
+
+    def update_source(self, source_id: int, *, name: str, url: str, country: str, source_type: str, notes: str, capability: str) -> None:
+        clean_url = url.strip()
+        self._validate_source_values(name=name, url=clean_url, country=country, source_type=source_type, capability=capability)
+        duplicate = self.connection.execute("SELECT 1 FROM job_sources WHERE url=? AND id<>? LIMIT 1", (clean_url, source_id)).fetchone()
+        if duplicate:
+            raise ValueError("A source with this URL already exists")
+        self.connection.execute("UPDATE job_sources SET name=?, url=?, country=?, source_type=?, notes=?, capability=? WHERE id=?", (name.strip(), clean_url, country.strip(), source_type.strip(), notes.strip(), capability, source_id))
+        self.log("source_updated", str(source_id))
+        self.connection.commit()
+
+    def delete_source(self, source_id: int) -> None:
+        """Delete a source definition; imported jobs retain their source snapshots."""
+        self.connection.execute("DELETE FROM job_sources WHERE id=?", (source_id,))
+        self.log("source_deleted", str(source_id))
+        self.connection.commit()
 
     def has_source_url(self, url: str) -> bool:
         return self.connection.execute(

@@ -1,11 +1,15 @@
 """Professional local UI without a Node build chain."""
 
 from html import escape
+import hmac
 from pathlib import Path
-from urllib.parse import quote
+import secrets
+import time
+from urllib.parse import quote, urlsplit
 
-from fastapi import FastAPI, File, Form, Query, UploadFile
+from fastapi import FastAPI, File, Form, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from sampoagent.applications.answers import save_answer
 from sampoagent.applications.workflow import classify_question
@@ -15,32 +19,43 @@ from sampoagent.country_packs.finland import builtin_sources
 from sampoagent.db.repository import Repository
 from sampoagent.jobs.matching import matches_preferences
 from sampoagent.jobs.service import normalize_job, verification_state
+from sampoagent.jobs.runner import run_discovery
+from sampoagent.integrations.email_oauth import EmailIntegrationError, OAuthConfig, authorization_url, create_pkce_pair, decrypt_token_payload, encrypt_token_payload, exchange_code, refresh_access_token
+from sampoagent.integrations.mailbox import fetch_recent_messages
 from sampoagent.jobs.sources import source_health
 from sampoagent.scoring.engine import DimensionConfig
 from sampoagent.scoring.job_score import dump_configs, evaluate_job, load_configs
 from sampoagent.cv.service import ROLE_FAMILIES, generate_cv_pdf, validate_ats_pdf
 
 
-NAVIGATION = [("Dashboard", "/"), ("Profile", "/profile"), ("Career Suggestions", "/careers"), ("CVs", "/cvs"), ("Jobs", "/jobs"), ("Sources", "/sources"), ("Application Queue", "/queue"), ("Applications", "/applications"), ("Answer Bank", "/answers"), ("Analytics", "/analytics"), ("Agent", "/agent"), ("Settings", "/settings")]
+NAVIGATION = [("Dashboard", "/"), ("Profile", "/profile"), ("Career Suggestions", "/careers"), ("CVs", "/cvs"), ("Jobs", "/jobs"), ("Sources", "/sources"), ("Application Queue", "/queue"), ("Applications", "/applications"), ("Email", "/settings/email"), ("Answer Bank", "/answers"), ("Analytics", "/analytics"), ("Agent", "/agent"), ("Settings", "/settings")]
+PRIMARY_NAVIGATION = {"Dashboard", "Profile", "CVs", "Jobs", "Sources", "Applications", "Email", "Settings"}
 
 
 def _page(title: str, body: str, *, path: str | None = None) -> HTMLResponse:
     """Render the consistent, keyboard-accessible local application shell."""
     current_path = path or next((href for label, href in NAVIGATION if label == title), "")
-    nav = "".join(
+    primary_nav = "".join(
         f'<a class="nav-link{" active" if href == current_path else ""}" '
         f'aria-current="{"page" if href == current_path else "false"}" href="{href}">{label}</a>'
-        for label, href in NAVIGATION
+        for label, href in NAVIGATION if label in PRIMARY_NAVIGATION
     )
+    extra_items = [(label, href) for label, href in NAVIGATION if label not in PRIMARY_NAVIGATION]
+    extras_open = " open" if any(href == current_path for _, href in extra_items) else ""
+    extra_nav = "".join(
+        f'<a class="nav-link{" active" if href == current_path else ""}" aria-current="{"page" if href == current_path else "false"}" href="{href}">{label}</a>'
+        for label, href in extra_items
+    )
+    nav = primary_nav + f"<details class='nav-more'{extras_open}><summary class='nav-link'>More tools</summary><div class='nav-extra' style='display:grid;gap:.25rem'>{extra_nav}</div></details>"
     responsive_body = body.replace("<table>", '<div class="table-wrap"><table>').replace("</table>", "</table></div>")
     return HTMLResponse(f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{escape(title)} · SampoAgent</title><style>
-:root{{--surface-0:#090b14;--surface-1:#111526;--surface-2:#181d32;--surface-3:#222844;--border:#303858;--text:#f3f5ff;--muted:#aeb7d0;--primary:#6654d9;--primary-hover:#a79cff;--success:#4fd6a8;--review:#ffc869;--risk:#ff7b91;--focus:#6db8ff;--radius:18px;--shadow:0 18px 45px rgba(0,0,0,.28)}}
+:root{{--surface-0:#090b14;--surface-1:#111526;--surface-2:#181d32;--surface-3:#222844;--border:#303858;--text:#f3f5ff;--muted:#aeb7d0;--primary:#5141b6;--primary-hover:#c1b8ff;--success:#4fd6a8;--review:#ffc869;--risk:#ff7b91;--focus:#6db8ff;--radius:18px;--shadow:0 18px 45px rgba(0,0,0,.28)}}
 *{{box-sizing:border-box}} body{{margin:0;background:var(--surface-0);color:var(--text);font:15px/1.55 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}} a{{color:inherit}} .skip-link{{position:absolute;left:1rem;top:-5rem;background:var(--text);color:var(--surface-0);padding:.65rem 1rem;border-radius:8px;z-index:10}}.skip-link:focus{{top:1rem}}
 .app-shell{{display:grid;grid-template-columns:248px minmax(0,1fr);min-height:100vh}}.sidebar{{position:sticky;top:0;height:100vh;overflow-y:auto;padding:1.5rem 1rem;background:linear-gradient(180deg,#12172a,#0c0f1d);border-right:1px solid var(--border)}}.brand{{display:flex;gap:.7rem;align-items:center;padding:.45rem .65rem 1.7rem}}.brand-mark{{display:grid;place-items:center;width:34px;height:34px;border-radius:11px;background:linear-gradient(135deg,var(--primary),#4b61c4);font-weight:900}}.brand-copy strong,.brand-copy span{{display:block}}.brand-copy span{{font-size:.75rem;color:var(--muted)}}.sidebar nav{{display:grid;gap:.25rem}}.nav-link{{padding:.63rem .75rem;color:var(--muted);text-decoration:none;border-radius:10px;font-weight:650}}.nav-link:hover{{background:rgba(139,124,255,.13);color:var(--text)}}.nav-link.active{{background:linear-gradient(90deg,rgba(139,124,255,.28),rgba(109,184,255,.12));color:#fff;box-shadow:inset 3px 0 var(--primary)}}
 .main-content{{width:min(1260px,100%);padding:2.5rem clamp(1rem,4vw,4rem);margin:0 auto}}.page-header{{margin:0 0 1.5rem}}.eyebrow{{margin:0 0 .2rem;color:var(--primary-hover);font-size:.78rem;font-weight:800;letter-spacing:.12em;text-transform:uppercase}}h1{{margin:0;font-size:clamp(2rem,4vw,3.1rem);letter-spacing:-.045em}}h2{{letter-spacing:-.025em}}h3{{margin-top:0}} p{{color:var(--muted)}}
 section,.panel{{background:linear-gradient(145deg,rgba(30,36,61,.94),rgba(17,21,38,.94));border:1px solid var(--border);border-radius:var(--radius);padding:1.3rem;margin:1rem 0;box-shadow:var(--shadow)}}.panel-heading{{display:flex;align-items:center;justify-content:space-between;gap:1rem}}.table-wrap{{overflow-x:auto;border:1px solid var(--border);border-radius:12px}}table{{border-collapse:collapse;width:100%;min-width:650px}}th,td{{padding:.85rem 1rem;border-bottom:1px solid rgba(48,56,88,.75);text-align:left;vertical-align:top}}th{{background:rgba(255,255,255,.035);color:#cbd4f4;font-size:.76rem;letter-spacing:.08em;text-transform:uppercase}}tr:last-child td{{border-bottom:0}}
 .dashboard-hero{{padding:clamp(1.5rem,4vw,2.5rem);background:radial-gradient(circle at 88% 15%,rgba(109,184,255,.27),transparent 27%),linear-gradient(135deg,#252057,#151b38);border-color:#4c4b85}}.dashboard-hero h2{{max-width:650px;font-size:clamp(1.6rem,3vw,2.35rem);margin:.7rem 0 .25rem}}.metric-grid{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:1rem;margin:1rem 0}}.metric-card{{padding:1.15rem;border:1px solid var(--border);border-radius:14px;background:var(--surface-1)}}.metric-card span{{display:block;color:var(--muted);font-size:.82rem;font-weight:700}}.metric-card strong{{display:block;margin-top:.45rem;font-size:1.75rem;letter-spacing:-.04em}}.content-grid{{display:grid;grid-template-columns:1.15fr .85fr;gap:1rem}}.activity-list{{margin:0;padding-left:1.2rem;color:var(--muted)}}.next-step{{margin:.5rem 0;padding:.75rem;border-radius:10px;background:rgba(139,124,255,.1);color:#e2e6ff}}
-form{{display:flex;flex-wrap:wrap;gap:.75rem;align-items:end;margin:.9rem 0}}label{{display:grid;gap:.32rem;min-width:150px;color:#d7ddf5;font-size:.86rem;font-weight:650}}input,select,button{{font:inherit;border-radius:10px;padding:.62rem .75rem}}input,select{{min-height:42px;background:#0c1020;color:var(--text);border:1px solid #414b71}}input:focus,select:focus,button:focus,a:focus{{outline:3px solid var(--focus);outline-offset:2px}}button{{border:1px solid transparent;background:linear-gradient(135deg,var(--primary),#4b61c4);color:white;font-weight:750;cursor:pointer;box-shadow:0 8px 18px rgba(91,91,219,.22)}}button:hover{{filter:brightness(1.08)}}button.secondary{{background:var(--surface-3);border-color:#485276}}button.danger{{background:linear-gradient(135deg,#bf3658,#962443)}}.notice{{color:#dbe2fc;background:rgba(109,184,255,.1);border-left:3px solid var(--focus);padding:.7rem .85rem;border-radius:8px}}.metric{{font-size:1.8rem;font-weight:800}}.status{{display:inline-flex;align-items:center;gap:.35rem;border-radius:999px;padding:.25rem .58rem;font-size:.78rem;font-weight:800;white-space:nowrap}}.status-success{{color:#a7f3d6;background:rgba(79,214,168,.14)}}.status-review{{color:#ffdc91;background:rgba(255,200,105,.14)}}.status-risk{{color:#ffb3c0;background:rgba(255,123,145,.14)}}.action-row{{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center}}.empty-state{{padding:1.5rem;text-align:center;color:var(--muted)}}.settings-form{{display:block}}.settings-group{{padding:1rem 0;border-top:1px solid var(--border)}}.settings-group:first-child{{border-top:0;padding-top:0}}.settings-group h3{{margin-bottom:.25rem}}.settings-fields{{display:flex;flex-wrap:wrap;gap:.75rem;align-items:end}}fieldset{{min-width:240px;border:1px solid var(--border);border-radius:12px;padding:.85rem}}legend{{color:var(--primary-hover);font-weight:800}}
+form{{display:flex;flex-wrap:wrap;gap:.75rem;align-items:end;margin:.9rem 0}}label{{display:grid;gap:.32rem;min-width:150px;color:#d7ddf5;font-size:.86rem;font-weight:650}}input,select,button{{font:inherit;border-radius:10px;padding:.62rem .75rem}}input,select{{min-height:42px;background:#0c1020;color:var(--text);border:1px solid #414b71}}input:focus,select:focus,button:focus,a:focus{{outline:3px solid var(--focus);outline-offset:2px}}button{{border:1px solid transparent;background:linear-gradient(135deg,var(--primary),#392c89);color:white;font-weight:750;cursor:pointer;box-shadow:0 8px 18px rgba(91,91,219,.22)}}button:hover{{filter:none;box-shadow:0 0 0 2px rgba(193,184,255,.35)}}button:disabled{{opacity:.65;cursor:not-allowed}}button.secondary{{background:var(--surface-3);border-color:#485276}}button.danger{{background:linear-gradient(135deg,#98233f,#68152b)}}.notice{{color:#dbe2fc;background:rgba(109,184,255,.1);border-left:3px solid var(--focus);padding:.7rem .85rem;border-radius:8px}}.metric{{font-size:1.8rem;font-weight:800}}.status{{display:inline-flex;align-items:center;gap:.35rem;border-radius:999px;padding:.25rem .58rem;font-size:.78rem;font-weight:800;white-space:nowrap}}.status-success{{color:#a7f3d6;background:rgba(79,214,168,.14)}}.status-review{{color:#ffdc91;background:rgba(255,200,105,.14)}}.status-risk{{color:#ffb3c0;background:rgba(255,123,145,.14)}}.action-row{{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center}}.empty-state{{padding:1.5rem;text-align:center;color:var(--muted)}}.settings-form{{display:block}}.settings-group{{padding:1rem 0;border-top:1px solid var(--border)}}.settings-group:first-child{{border-top:0;padding-top:0}}.settings-group h3{{margin-bottom:.25rem}}.settings-fields{{display:flex;flex-wrap:wrap;gap:.75rem;align-items:end}}fieldset{{min-width:240px;border:1px solid var(--border);border-radius:12px;padding:.85rem}}legend{{color:var(--primary-hover);font-weight:800}}
 @media (max-width: 760px){{.app-shell{{display:block}}.sidebar{{position:static;height:auto;padding:1rem;border-right:0;border-bottom:1px solid var(--border)}}.brand{{padding:.2rem .3rem .8rem}}.sidebar nav{{display:flex;overflow-x:auto;padding-bottom:.25rem}}.nav-link{{white-space:nowrap}}.main-content{{padding:1.5rem 1rem}}section,.panel{{padding:1rem}}form{{display:grid}}label{{min-width:0}}button{{min-height:42px}}.metric-grid,.content-grid{{grid-template-columns:1fr}}}}
 </style></head><body><a class="skip-link" href="#content">Skip to content</a><div class="app-shell"><aside class="sidebar"><div class="brand"><span class="brand-mark">S</span><span class="brand-copy"><strong>SampoAgent</strong><span>Career workspace</span></span></div><nav aria-label="Main navigation">{nav}</nav></aside><main class="main-content" id="content"><header class="page-header"><p class="eyebrow">Career workspace</p><h1>{escape(title)}</h1></header>{responsive_body}</main></div></body></html>""")
 
@@ -50,12 +65,27 @@ def _status(text: str, tone: str) -> str:
 
 
 def create_app(database_path: str | Path = "sampoagent.db", *, demo_data: bool = False) -> FastAPI:
+    from dotenv import load_dotenv
+
+    load_dotenv(override=False)
     repository = Repository(database_path)
     repository.initialize()
     if demo_data:
         repository.load_demo()
     app = FastAPI(title="SampoAgent", docs_url=None, redoc_url=None)
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1", "[::1]", "testserver"])
     app.state.repository = repository
+    app.state.email_oauth_states = {}
+
+    @app.middleware("http")
+    async def protect_local_form_posts(request: Request, call_next):
+        if request.method == "POST":
+            origin = request.headers.get("origin")
+            fetch_site = request.headers.get("sec-fetch-site", "").casefold()
+            expected_origin = f"{request.url.scheme}://{request.url.netloc}"
+            if (origin is not None and not hmac.compare_digest(origin.rstrip("/"), expected_origin)) or fetch_site == "cross-site":
+                return HTMLResponse("Cross-origin form submission rejected.", status_code=403)
+        return await call_next(request)
 
     def score_for_job(job: dict[str, object]) -> object:
         return evaluate_job(
@@ -98,9 +128,9 @@ def create_app(database_path: str | Path = "sampoagent.db", *, demo_data: bool =
         facts = repository.rows("facts")
         rows = "".join(f"<tr><td>{escape(str(f['type']))}</td><td>{escape(str(f['value']))}</td><td>{escape(str(f['provenance']))}</td><td>{_status('Rejected', 'risk') if f['rejected'] else (_status('Confirmed', 'success') if f['confirmed'] else _status('Review needed', 'review'))}</td><td><form style='display:inline' method='post' action='/profile/facts/{f['id']}/confirm'><button>Confirm</button></form> <form style='display:inline' method='post' action='/profile/facts/{f['id']}/reject'><button class='danger'>Reject</button></form> <form style='display:inline' method='post' action='/profile/facts/{f['id']}/edit'><input name='value' value='{escape(str(f['value']))}' required><button class='secondary'>Correct</button></form> <form style='display:inline' method='post' action='/profile/facts/{f['id']}/delete'><button class='danger'>Delete</button></form></td></tr>" for f in facts)
         record_rows = "".join(
-            f"<tr><td>{escape(record_type.title())}</td><td>{escape(str(record.get('title', '')))}</td><td>{escape(str(record.get('details', '')))}</td></tr>"
+            f"<tr><td>{escape(record_type.title())}</td><td>{escape(str(record.get('title', '')))}</td><td>{escape(str(record.get('details', '')))}<details><summary>Edit or remove</summary><form method='post' action='/profile/records/{record['id']}/edit'><label>Title <input name='title' value='{escape(str(record.get('title', '')))}' required></label><label>Details <input name='details' value='{escape(str(record.get('details', '')))}'></label><button>Save</button></form><form method='post' action='/profile/records/{record['id']}/delete'><button class='danger'>Remove record</button></form></details></td></tr>"
             for record_type in ("experience", "education", "certificate", "licence", "language", "availability")
-            for record in repository.candidate_records(record_type)
+            for record in repository.candidate_record_rows(record_type)
         ) or "<tr><td colspan='3'>No structured profile records yet.</td></tr>"
         record_form = "<form method='post' action='/profile/records'><label>Record type <select name='record_type'><option value='experience'>Experience</option><option value='education'>Education</option><option value='certificate'>Certificate</option><option value='licence'>Licence</option><option value='language'>Language</option><option value='availability'>Availability</option></select></label> <label>Title <input name='title' required></label> <label>Details <input name='details'></label> <button>Add record</button></form>"
         identity_form = f"<form method='post' action='/profile/details'><label>Name <input name='name' value='{escape(candidate['name'] if candidate else '')}' required></label> <label>Email <input name='email' type='email' value='{escape(candidate.get('email', '') if candidate else '')}'></label> <label>Preferred language <select name='locale'><option value='fi'{' selected' if candidate and candidate['locale'] == 'fi' else ''}>Finnish</option><option value='en'{' selected' if not candidate or candidate['locale'] == 'en' else ''}>English</option></select></label><button>Save profile</button></form>"
@@ -121,8 +151,21 @@ def create_app(database_path: str | Path = "sampoagent.db", *, demo_data: bool =
     def add_candidate_record(record_type: str = Form(...), title: str = Form(...), details: str = Form("")) -> RedirectResponse:
         allowed = {"experience", "education", "certificate", "licence", "language", "availability"}
         if record_type in allowed and title.strip():
-            repository.add_candidate_record(record_type, {"title": title.strip(), "details": details.strip()})
-            repository.add_confirmed_fact(fact_type=record_type, value=title.strip())
+            record_id = repository.add_candidate_record(record_type, {"title": title.strip(), "details": details.strip()})
+            repository.add_confirmed_fact(fact_type=record_type, value=title.strip(), source_id=f"candidate_record:{record_id}")
+        return RedirectResponse("/profile", status_code=303)
+
+    @app.post("/profile/records/{record_id}/edit")
+    def edit_candidate_record(record_id: int, title: str = Form(...), details: str = Form("")) -> RedirectResponse:
+        try:
+            repository.update_candidate_record(record_id, title=title, details=details)
+        except ValueError:
+            pass
+        return RedirectResponse("/profile", status_code=303)
+
+    @app.post("/profile/records/{record_id}/delete")
+    def delete_candidate_record(record_id: int) -> RedirectResponse:
+        repository.delete_candidate_record(record_id)
         return RedirectResponse("/profile", status_code=303)
 
     @app.post("/profile/facts/{fact_id}/confirm")
@@ -156,11 +199,11 @@ def create_app(database_path: str | Path = "sampoagent.db", *, demo_data: bool =
             for item in recommendations
         ) or "<tr><td colspan='4'>Add confirmed skills to receive deterministic recommendations.</td></tr>"
         profiles = "".join(
-            f"<tr><td>{escape(str(profile['name']))}</td><td>{escape(str(profile['notes']))}</td><td>{'Active' if profile['enabled'] else 'Inactive'}</td><td><form style='display:inline' method='post' action='/careers/profiles/{profile['id']}/toggle'><button>{'Deactivate' if profile['enabled'] else 'Activate'}</button></form> <form style='display:inline' method='post' action='/careers/profiles/{profile['id']}/delete'><button>Delete</button></form></td></tr>"
+            f"<tr><td>{escape(str(profile['name']))}</td><td>{escape(str(profile['notes']))}</td><td>{'Active' if profile['enabled'] else 'Inactive'}</td><td><form style='display:inline' method='post' action='/careers/profiles/{profile['id']}/toggle'><button>{'Deactivate' if profile['enabled'] else 'Activate'}</button></form> <details><summary>Edit</summary><form method='post' action='/careers/profiles/{profile['id']}/edit'><label>Name <input name='name' value='{escape(str(profile['name']))}' required></label><label>Notes <input name='notes' value='{escape(str(profile['notes']))}'></label><button>Save</button></form></details> <form method='post' action='/careers/profiles/{profile['id']}/delete'><button class='danger'>Delete</button></form></td></tr>"
             for profile in repository.rows("career_profiles")
         ) or "<tr><td colspan='4'>No career profiles yet.</td></tr>"
         target_rows = "".join(
-            f"<tr><td>{escape(str(target['title_en']))} / {escape(str(target['title_fi']))}</td><td>{'Active' if target['enabled'] else 'Inactive'}</td><td><form method='post' action='/careers/targets/{target['id']}/toggle'><button>{'Deactivate' if target['enabled'] else 'Activate'}</button></form></td></tr>"
+            f"<tr><td>{escape(str(target['title_en']))} / {escape(str(target['title_fi']))}</td><td>{'Active' if target['enabled'] else 'Inactive'}</td><td><form method='post' action='/careers/targets/{target['id']}/toggle'><button>{'Deactivate' if target['enabled'] else 'Activate'}</button></form><form method='post' action='/careers/targets/{target['id']}/delete'><button class='danger'>Remove</button></form></td></tr>"
             for target in targets
         ) or "<tr><td colspan='3'>No approved targets yet.</td></tr>"
         form = "<form method='post' action='/careers/profiles'><label>Career profile <input name='name' required></label> <label>Notes <input name='notes'></label> <button>Add profile</button></form>"
@@ -181,6 +224,11 @@ def create_app(database_path: str | Path = "sampoagent.db", *, demo_data: bool =
             repository.set_target_occupation_enabled(target_id, not bool(target["enabled"]))
         return RedirectResponse("/careers", status_code=303)
 
+    @app.post("/careers/targets/{target_id}/delete")
+    def delete_target_occupation(target_id: int) -> RedirectResponse:
+        repository.delete_target_occupation(target_id)
+        return RedirectResponse("/careers", status_code=303)
+
     @app.post("/careers/profiles")
     def add_career_profile(name: str = Form(...), notes: str = Form("")) -> RedirectResponse:
         if name.strip():
@@ -194,6 +242,14 @@ def create_app(database_path: str | Path = "sampoagent.db", *, demo_data: bool =
             repository.set_career_profile_enabled(profile_id, not bool(profile["enabled"]))
         return RedirectResponse("/careers", status_code=303)
 
+    @app.post("/careers/profiles/{profile_id}/edit")
+    def edit_career_profile(profile_id: int, name: str = Form(...), notes: str = Form("")) -> RedirectResponse:
+        try:
+            repository.update_career_profile(profile_id, name=name, notes=notes)
+        except ValueError:
+            pass
+        return RedirectResponse("/careers", status_code=303)
+
     @app.post("/careers/profiles/{profile_id}/delete")
     def delete_career_profile(profile_id: int) -> RedirectResponse:
         if repository.career_profile(profile_id):
@@ -201,7 +257,7 @@ def create_app(database_path: str | Path = "sampoagent.db", *, demo_data: bool =
         return RedirectResponse("/careers", status_code=303)
 
     @app.get("/jobs", response_class=HTMLResponse)
-    def jobs() -> HTMLResponse:
+    def jobs(notice: str = Query(default="")) -> HTMLResponse:
         job_rows = [job for job in repository.rows("jobs") if matches_preferences(job=job, preferences=repository.preferences())]
 
         def job_row(job: dict[str, object]) -> str:
@@ -215,8 +271,42 @@ def create_app(database_path: str | Path = "sampoagent.db", *, demo_data: bool =
             return f"<tr><td>{escape(str(job['title']))}</td><td>{escape(str(job['company']))}</td><td>{escape(str(job['location']))}</td><td>{escape(str(job['verification_state']))}<br>{language_form}</td><td>{'Blocked: ' + escape('; '.join(score.hard_failures)) if score.hard_blocked else f'{score.final_score:.0f}%'} </td><td>{escape(' · '.join(score.explanations))}<br>{escape(override_text)}{action}</td></tr>"
 
         rows = "".join(job_row(job) for job in job_rows) or "<tr><td colspan='6'>No jobs match your current preferences.</td></tr>"
-        form = "<form method='post' action='/jobs/import'><label>Title <input name='title' required></label> <label>Employer <input name='company' required></label> <label>Location <input name='location' required></label> <label>Description <input name='description' required></label> <label>Application URL <input name='application_url' type='url' required></label> <button>Import job</button></form>"
-        return _page("Jobs", f"<section><p>Manual URL and description import is available locally; protected sites remain browser-only.</p>{form}</section><section><p>Scores use only confirmed facts. Eligibility, competitive strength, and confidence are calculated per job; hard failures override the numerical score.</p><table><tr><th>Title</th><th>Employer</th><th>Location</th><th>Verification</th><th>Score</th><th>Why</th></tr>{rows}</table></section>")
+        form = "<form method='post' action='/jobs/import'><label>Title <input name='title' required></label> <label>Employer <input name='company' required></label> <label>Location <input name='location' required></label> <label>Description <input name='description' required></label> <label>Application URL <input name='application_url' type='url' required></label> <button class='secondary'>Add a job manually</button></form>"
+        last_run = repository.latest_discovery_run()
+        summary = "No search run yet. Your confirmed experience and saved role targets will shape the search links." if not last_run else str(last_run["summary"])
+        query_links = "".join(
+            f"<li><a href='{escape(query.search_url)}' target='_blank' rel='noopener noreferrer'>{escape(query.phrase)}{(' · ' + escape(query.location)) if query.location else ''} — {escape(query.source_name)}</a></li>"
+            for query in (run_discovery_preview(repository).queries[:30])
+        ) or "<li>Add confirmed experience, a target role, or a search keyword to create personalized searches.</li>"
+        message = f"<p class='notice' role='status'>{escape(notice)}</p>" if notice else ""
+        latest_results = repository.discovery_source_results(int(last_run["id"])) if last_run else []
+        result_cards = "".join(
+            f"<article class='metric-card'><strong>{escape(str(result['source_name']))}</strong><p>{escape(str(result['status']).replace('_', ' ').title())} · {int(result['jobs_found'])} found · {int(result['imported_count'])} added</p><p>{escape(str(result['message']))}</p></article>"
+            for result in latest_results
+        ) or ""
+        result_section = f"<section><h2>Last source results</h2><div class='metric-grid'>{result_cards}</div></section>" if result_cards else ""
+        body = f"<section class='dashboard-hero'><p>Search from your profile</p><h2>Find matching jobs without typing every role by hand.</h2><p>Search terms come only from confirmed experience, saved target roles and your preferences. Public feed results can be added automatically; other sites open as personalized searches.</p><form method='post' action='/jobs/discover'><button>Find matching jobs</button></form><p class='notice'>{escape(summary)}</p>{message}</section><section><div class='panel-heading'><h2>Personalized search links</h2><a href='/sources'>Manage sources</a></div><ul>{query_links}</ul></section>{result_section}<section><h2>Matching jobs</h2><p>Scores use confirmed facts only. Every imported result keeps its source and verification status for your review.</p><table><tr><th>Title</th><th>Employer</th><th>Location</th><th>Verification</th><th>Score</th><th>Why</th></tr>{rows}</table>{form}</section>"
+        return _page("Jobs", body)
+
+    def run_discovery_preview(repository: Repository):
+        from sampoagent.jobs.discovery import build_search_plan
+
+        record_types = ("experience", "education", "certificate", "licence", "language", "availability")
+        return build_search_plan(
+            facts=repository.rows("facts"),
+            candidate_records={kind: repository.candidate_records(kind) for kind in record_types},
+            targets=repository.target_occupations(),
+            career_profiles=repository.rows("career_profiles"),
+            preferences=repository.preferences(),
+            sources=repository.rows("job_sources"),
+        )
+
+    @app.post("/jobs/discover")
+    def discover_jobs() -> RedirectResponse:
+        if not repository.profile():
+            return RedirectResponse("/onboarding", status_code=303)
+        report = run_discovery(repository)
+        return RedirectResponse("/jobs?notice=" + quote(f"Search finished: {report.jobs_found} found, {report.imported_count} added, {report.duplicates_count} duplicates."), status_code=303)
 
     @app.post("/jobs/import")
     def import_job(title: str = Form(...), company: str = Form(...), location: str = Form(...), description: str = Form(...), application_url: str = Form(...)) -> RedirectResponse:
@@ -240,17 +330,49 @@ def create_app(database_path: str | Path = "sampoagent.db", *, demo_data: bool =
         return RedirectResponse("/jobs", status_code=303)
 
     @app.get("/sources", response_class=HTMLResponse)
-    def sources() -> HTMLResponse:
-        rows = "".join(f"<tr><td>{escape(str(source['name']))}</td><td>{escape(str(source['source_type']))}</td><td>{escape(str(source['country']))}</td><td>{escape(source_health(str(source['url']), str(source['capability'])))}</td><td>{'Active' if source['enabled'] else 'Inactive'} <form style='display:inline' method='post' action='/sources/{source['id']}/toggle'><button>{'Disable' if source['enabled'] else 'Enable'}</button></form></td></tr>" for source in repository.rows("job_sources"))
-        form = "<form method='post' action='/sources'><label>Name <input name='name' required></label> <label>URL <input name='url' type='url' required></label> <label>Country <input name='country' value='Finland' required></label> <label>Type <select name='source_type'><option>job board</option><option>public-sector board</option><option>recruitment agency</option><option>employer career site</option><option>custom</option></select></label> <label>Notes <input name='notes'></label> <button>Add source</button></form>"
+    def sources(notice: str = Query(default=""), q: str = Query(default="")) -> HTMLResponse:
+        last_run = repository.latest_discovery_run()
+        latest_results = {int(result["source_id"]): result for result in repository.discovery_source_results(int(last_run["id"])) if result["source_id"] is not None} if last_run else {}
+        all_source_rows = repository.rows("job_sources")
+        search_key = q.strip().casefold()
+        visible_source_rows = [source for source in all_source_rows if not search_key or search_key in " ".join(str(source.get(key, "")) for key in ("name", "url", "source_type", "country", "capability", "notes")).casefold()]
+        capabilities = ("Browser search only", "RSS/Atom feed", "JSON Feed", "Job Market Finland API")
+        def capability_options(selected: str) -> str:
+            return "".join(f"<option value='{escape(value)}{' selected' if value == selected else ''}'>{escape(value)}</option>" for value in capabilities)
+        rows = "".join(
+            f"<tr><td><strong>{escape(str(source['name']))}</strong><br>{escape(str(source['notes']))}</td><td>{escape(str(source['source_type']))}<br>{escape(str(source['country']))}</td><td>{escape(str(source['capability']))}<br>{escape(source_health(str(source['url']), str(source['capability'])))}</td><td>{escape(str(latest_results.get(int(source['id']), {}).get('status', 'Not checked')))} · {int(latest_results.get(int(source['id']), {}).get('jobs_found', 0))} found / {int(latest_results.get(int(source['id']), {}).get('imported_count', 0))} added</td><td>{'Active' if source['enabled'] else 'Inactive'} <form style='display:inline' method='post' action='/sources/{source['id']}/toggle'><button class='secondary'>{'Disable' if source['enabled'] else 'Enable'}</button></form></td><td><details><summary>Edit source</summary><form method='post' action='/sources/{source['id']}/edit'><label>Name <input name='name' value='{escape(str(source['name']))}' required></label><label>URL <input name='url' type='url' value='{escape(str(source['url']))}' required></label><label>Country <input name='country' value='{escape(str(source['country']))}' required></label><label>Type <select name='source_type'><option>{escape(str(source['source_type']))}</option><option>job board</option><option>public-sector board</option><option>recruitment agency</option><option>employer career site</option><option>custom</option></select></label><label>How to search <select name='capability'>{capability_options(str(source['capability']))}</select></label><label>Notes <input name='notes' value='{escape(str(source['notes']))}'></label><button>Save source</button></form><form method='post' action='/sources/{source['id']}/delete' onsubmit=\"return confirm('Remove this source? Previously imported jobs keep their source details.')\"><button class='danger'>Remove source</button></form></details></td></tr>"
+            for source in visible_source_rows
+        ) or "<tr><td colspan='6'>No matching sources. Adjust the search or add a source.</td></tr>"
+        form = f"<form method='post' action='/sources'><label>Name <input name='name' required></label> <label>URL <input name='url' type='url' placeholder='https://example.org/careers' required></label> <label>Country <input name='country' value='Finland' required></label> <label>Type <select name='source_type'><option>job board</option><option>public-sector board</option><option>recruitment agency</option><option>employer career site</option><option>custom</option></select></label> <label>How to search <select name='capability'>{capability_options('Browser search only')}</select></label> <label>Notes <input name='notes'></label> <button>Add source</button></form>"
         catalogue = " · ".join(source.name for source in builtin_sources())
         builtins = "<form method='post' action='/sources/builtin'><button>Add missing Finland sources</button></form>"
-        return _page("Sources", f"<section><p>Sources respect access controls and robots restrictions. Protected or interactive sources are browser-only, never scraped.</p>{form}{builtins}<p class='notice'>Finland catalogue: {escape(catalogue)}</p></section><section><table><tr><th>Name</th><th>Type</th><th>Country</th><th>Capability / local health</th><th>State</th></tr>{rows}</table></section>")
+        message = f"<p class='notice' role='status'>{escape(notice)}</p>" if notice else ""
+        search_form = f"<form method='get' action='/sources'><label>Find a source <input name='q' value='{escape(q)}' placeholder='Search by name, type, country'></label><button class='secondary'>Search</button></form><p>{len(visible_source_rows)} of {len(all_source_rows)} sources</p>"
+        return _page("Sources", f"<section><h2>Control what SampoAgent can search</h2><p>Protected or interactive websites are browser-only. Only explicitly marked public feeds and the official Job Market Finland API are checked automatically. CAPTCHA/proxy bypass is never used.</p>{message}{form}{builtins}<p class='notice'>Finland catalogue: {escape(catalogue)}</p></section><section>{search_form}<table><tr><th>Source</th><th>Category</th><th>Capability</th><th>Last scan</th><th>State</th><th>Manage</th></tr>{rows}</table></section>")
 
     @app.post("/sources")
-    def add_source(name: str = Form(...), url: str = Form(...), country: str = Form(...), source_type: str = Form(...), notes: str = Form("")) -> RedirectResponse:
-        repository.add_source(name=name, url=url, country=country, source_type=source_type, notes=notes)
+    def add_source(name: str = Form(...), url: str = Form(...), country: str = Form(...), source_type: str = Form(...), capability: str = Form("Browser search only"), notes: str = Form("")) -> RedirectResponse:
+        try:
+            repository.add_source(name=name, url=url, country=country, source_type=source_type, notes=notes, capability=capability)
+        except ValueError as exc:
+            return RedirectResponse("/sources?notice=" + quote(str(exc)), status_code=303)
         return RedirectResponse("/sources", status_code=303)
+
+    @app.post("/sources/{source_id}/edit")
+    def edit_source(source_id: int, name: str = Form(...), url: str = Form(...), country: str = Form(...), source_type: str = Form(...), capability: str = Form(...), notes: str = Form("")) -> RedirectResponse:
+        if not repository.source(source_id):
+            return RedirectResponse("/sources?notice=" + quote("Source was not found."), status_code=303)
+        try:
+            repository.update_source(source_id, name=name, url=url, country=country, source_type=source_type, notes=notes, capability=capability)
+        except ValueError as exc:
+            return RedirectResponse("/sources?notice=" + quote(str(exc)), status_code=303)
+        return RedirectResponse("/sources?notice=" + quote("Source settings saved."), status_code=303)
+
+    @app.post("/sources/{source_id}/delete")
+    def remove_source(source_id: int) -> RedirectResponse:
+        if repository.source(source_id):
+            repository.delete_source(source_id)
+        return RedirectResponse("/sources?notice=" + quote("Source removed. Existing job source details were kept."), status_code=303)
 
     @app.post("/sources/builtin")
     def add_builtin_sources() -> RedirectResponse:
@@ -308,7 +430,7 @@ def create_app(database_path: str | Path = "sampoagent.db", *, demo_data: bool =
     @app.get("/applications", response_class=HTMLResponse)
     def applications(notice: str = Query(default="")) -> HTMLResponse:
         application_items = repository.rows("applications")
-        rows = "".join(f"<tr><td>{item['id']}</td><td>{escape(str(item['status']))}</td><td>{escape(str(item['cv_path'] or 'Not selected'))}</td><td>{escape(str(item['notes'] or '—'))}</td><td><form method='post' action='/applications/{item['id']}/status'><select name='status'><option>APPLIED</option><option>INTERVIEW</option><option>OFFER</option><option>REJECTED</option><option>WITHDRAWN</option></select><input name='note' placeholder='Optional note'><button>Update</button></form></td></tr>" for item in application_items) or "<tr><td colspan='5'>No applications tracked yet.</td></tr>"
+        rows = "".join(f"<tr><td>{item['id']}</td><td>{escape(str(item['status']))}</td><td>{escape(str(item['cv_path'] or 'Not selected'))}</td><td>{escape(str(item['notes'] or '—'))}</td><td><form method='post' action='/applications/{item['id']}/status'><select name='status'><option>APPLIED</option><option>APPLICATION_RECEIVED</option><option>INTERVIEW</option><option>ASSESSMENT</option><option>OFFER</option><option>REJECTED</option><option>WITHDRAWN</option></select><input name='note' placeholder='Optional note'><button>Update</button></form></td></tr>" for item in application_items) or "<tr><td colspan='5'>No applications tracked yet.</td></tr>"
         timelines = "".join(
             f"<details><summary>Application {item['id']} timeline</summary><ul>"
             + "".join(f"<li>{escape(str(event['status']))}: {escape(str(event['note']))}</li>" for event in repository.application_timeline(int(item["id"])))
@@ -327,7 +449,7 @@ def create_app(database_path: str | Path = "sampoagent.db", *, demo_data: bool =
     @app.post("/applications/{application_id}/status")
     def status_application(application_id: int, status: str = Form(...), note: str = Form("")) -> RedirectResponse:
         application = repository.application(application_id)
-        allowed = {"APPLIED", "INTERVIEW", "OFFER", "REJECTED", "WITHDRAWN", "FAILED", "NO_RESPONSE"}
+        allowed = {"APPLIED", "APPLICATION_RECEIVED", "INTERVIEW", "ASSESSMENT", "OFFER", "REJECTED", "WITHDRAWN", "FAILED", "NO_RESPONSE"}
         if status == "APPLIED" and application and application["status"] != "APPLIED":
             daily_limit = int(repository.setting("daily_limit") or "0")
             if not repository.can_queue_or_submit(daily_limit=daily_limit):
@@ -393,7 +515,27 @@ def create_app(database_path: str | Path = "sampoagent.db", *, demo_data: bool =
             f"<fieldset><legend>{name.replace('_', ' ').title()}</legend><label>Enabled <select name='{name}_enabled'><option value='yes'{' selected' if config.enabled else ''}>Yes</option><option value='no'{' selected' if not config.enabled else ''}>No</option></select></label> <label>{name.replace('_', ' ').title()} weight <input name='{name}_weight' type='number' min='0' max='100' value='{config.weight:g}' required></label> <label>{name.replace('_', ' ').title()} minimum <input name='{name}_minimum' type='number' min='0' max='100' value='{config.minimum:g}' required></label></fieldset>"
             for name, config in configs.items()
         )
-        form = f"<form class='settings-form' method='post' action='/settings'><div class='settings-group'><h3>Application controls</h3><div class='settings-fields'><label>Application mode <select name='application_mode'><option value='review_everything'{' selected' if application_mode == 'review_everything' else ''}>Review Everything</option><option value='smart_approval'{' selected' if application_mode == 'smart_approval' else ''}>Smart Approval</option><option value='autopilot'{' selected' if application_mode == 'autopilot' else ''}>Autopilot</option></select></label><label>Daily application limit <input name='daily_limit' type='number' min='0' value='{escape(repository.setting('daily_limit') or '0')}'></label><label>AI usage <select name='ai_usage_mode'><option value='minimal'{' selected' if ai_usage_mode == 'minimal' else ''}>Minimal</option><option value='balanced'{' selected' if ai_usage_mode == 'balanced' else ''}>Balanced</option><option value='quality'{' selected' if ai_usage_mode == 'quality' else ''}>Quality</option></select></label></div></div><div class='settings-group'><h3>Job preferences</h3><div class='settings-fields'><label>Preferred locations <input name='locations' value='{escape(str(preferences.get('locations', '')))}' placeholder='Helsinki, Vantaa'></label><label>Work type <select name='work_type'><option value='any'{' selected' if work_type == 'any' else ''}>Any</option><option value='onsite'{' selected' if work_type == 'onsite' else ''}>On-site</option><option value='hybrid'{' selected' if work_type == 'hybrid' else ''}>Hybrid</option><option value='remote'{' selected' if work_type == 'remote' else ''}>Remote</option></select></label><label>Search keywords <input name='keywords' value='{escape(str(preferences.get('keywords', '')))}'></label><label>Minimum monthly salary (€) <input name='salary_minimum' type='number' min='0' value='{escape(str(preferences.get('salary_minimum', 0)))}'></label></div></div><div class='settings-group'><h3>Explainable scoring configuration</h3><p>Enabled dimensions are reweighted automatically. A job must meet every enabled minimum.</p><div class='settings-fields'>{score_inputs}</div></div><button>Save settings</button></form>"
+        select_options = lambda key, choices, default: "".join(f"<option value='{value}'{' selected' if str(preferences.get(key, default)) == value else ''}>{label}</option>" for value, label in choices)
+        prefs_fields = (
+            f"<label>Preferred locations <input name='locations' value='{escape(str(preferences.get('locations', '')))}' placeholder='Helsinki, Vantaa'></label>"
+            f"<label>Exclude locations <input name='locations_exclude' value='{escape(str(preferences.get('locations_exclude', '')))}' placeholder='Tampere'></label>"
+            f"<label>Work setting <select name='work_type'>{select_options('work_type', [('any','Any'),('onsite','On-site'),('hybrid','Hybrid'),('remote','Remote')], 'any')}</select></label>"
+            f"<label>Employment type <select name='employment_type'>{select_options('employment_type', [('any','Any'),('full_time','Full-time'),('part_time','Part-time'),('temporary','Temporary'),('seasonal','Seasonal')], 'any')}</select></label>"
+            f"<label>Preferred shift <select name='schedule'>{select_options('schedule', [('any','Any'),('day','Day'),('evening','Evening'),('night','Night'),('weekend','Weekend')], 'any')}</select></label>"
+            f"<label>Job keywords <input name='keywords' value='{escape(str(preferences.get('keywords', '')))}'></label>"
+            f"<label>Search phrases to include <input name='search_terms_include' value='{escape(str(preferences.get('search_terms_include', '')))}'></label>"
+            f"<label>Search phrases to exclude <input name='search_terms_exclude' value='{escape(str(preferences.get('search_terms_exclude', '')))}'></label>"
+            f"<label>Job titles to include <input name='title_include' value='{escape(str(preferences.get('title_include', '')))}'></label>"
+            f"<label>Job titles to exclude <input name='title_exclude' value='{escape(str(preferences.get('title_exclude', '')))}'></label>"
+            f"<label>Industries to search <input name='industries' value='{escape(str(preferences.get('industries', '')))}'></label>"
+            f"<label>Employers to include <input name='employer_include' value='{escape(str(preferences.get('employer_include', '')))}'></label>"
+            f"<label>Employers to exclude <input name='employer_exclude' value='{escape(str(preferences.get('employer_exclude', '')))}'></label>"
+            f"<label>Minimum monthly salary (€) <input name='salary_minimum' type='number' min='0' value='{escape(str(preferences.get('salary_minimum', 0)))}'></label>"
+            f"<label>Search radius (km) <input name='radius_km' type='number' min='0' max='500' value='{escape(str(preferences.get('radius_km', 0)))}'></label>"
+            f"<label>Include public-sector sources? <select name='include_public_sector'>{select_options('include_public_sector', [('yes','Yes'),('no','No')], 'yes')}</select></label>"
+            f"<label>Include recruitment agencies? <select name='include_recruitment_agencies'>{select_options('include_recruitment_agencies', [('yes','Yes'),('no','No')], 'yes')}</select></label>"
+        )
+        form = f"<form class='settings-form' method='post' action='/settings'><div class='settings-group'><h3>Application controls</h3><div class='settings-fields'><label>Application mode <select name='application_mode'><option value='review_everything'{' selected' if application_mode == 'review_everything' else ''}>Review Everything</option><option value='smart_approval'{' selected' if application_mode == 'smart_approval' else ''}>Smart Approval</option><option value='autopilot'{' selected' if application_mode == 'autopilot' else ''}>Autopilot</option></select></label><label>Daily application limit <input name='daily_limit' type='number' min='0' value='{escape(repository.setting('daily_limit') or '0')}'></label><label>AI usage <select name='ai_usage_mode'><option value='minimal'{' selected' if ai_usage_mode == 'minimal' else ''}>Minimal</option><option value='balanced'{' selected' if ai_usage_mode == 'balanced' else ''}>Balanced</option><option value='quality'{' selected' if ai_usage_mode == 'quality' else ''}>Quality</option></select></label></div></div><div class='settings-group'><h3>Job preferences &amp; search</h3><p>Comma-separated values are treated as alternatives. Radius is saved for future distance-aware matching; missing posting locations are not guessed.</p><div class='settings-fields'>{prefs_fields}</div></div><div class='settings-group'><h3>Explainable scoring configuration</h3><p>Enabled dimensions are reweighted automatically. A job must meet every enabled minimum.</p><div class='settings-fields'>{score_inputs}</div></div><button>Save settings</button></form>"
         disabled = ", ".join(f"{name.replace('_', ' ').title()} is disabled" for name, config in configs.items() if not config.enabled) or "No disabled dimensions"
         cache_form = "<form method='post' action='/settings/cache/clear'><button>Clear semantic cache</button></form>"
         message = f"<p class='notice' role='status'>{escape(notice)}</p>" if notice else ""
@@ -417,33 +559,163 @@ def create_app(database_path: str | Path = "sampoagent.db", *, demo_data: bool =
         work_type: str = Form("any"),
         keywords: str = Form(""),
         salary_minimum: int = Form(0),
+        locations_exclude: str = Form(""),
+        employment_type: str = Form("any"),
+        schedule: str = Form("any"),
+        search_terms_include: str = Form(""),
+        search_terms_exclude: str = Form(""),
+        title_include: str = Form(""),
+        title_exclude: str = Form(""),
+        industries: str = Form(""),
+        employer_include: str = Form(""),
+        employer_exclude: str = Form(""),
+        radius_km: int = Form(0),
+        include_public_sector: str = Form("yes"),
+        include_recruitment_agencies: str = Form("yes"),
     ) -> RedirectResponse:
-        if application_mode not in {"review_everything", "smart_approval", "autopilot"} or ai_usage_mode not in {"minimal", "balanced", "quality"} or work_type not in {"any", "onsite", "hybrid", "remote"} or daily_limit < 0 or salary_minimum < 0:
-            return RedirectResponse("/settings", status_code=303)
+        if application_mode not in {"review_everything", "smart_approval", "autopilot"} or ai_usage_mode not in {"minimal", "balanced", "quality"} or work_type not in {"any", "onsite", "hybrid", "remote"} or employment_type not in {"any", "full_time", "part_time", "temporary", "seasonal"} or schedule not in {"any", "day", "evening", "night", "weekend"} or include_public_sector not in {"yes", "no"} or include_recruitment_agencies not in {"yes", "no"} or daily_limit < 0 or salary_minimum < 0 or not 0 <= radius_km <= 500:
+            return RedirectResponse("/settings?notice=" + quote("Check the application and search preference values; nothing was changed."), status_code=303)
         raw_dimensions = {
             "eligibility": (eligibility_enabled, eligibility_weight, eligibility_minimum),
             "competitive_strength": (competitive_strength_enabled, competitive_strength_weight, competitive_strength_minimum),
             "confidence": (confidence_enabled, confidence_weight, confidence_minimum),
         }
         if any(enabled not in {"yes", "no"} or not 0 <= weight <= 100 or not 0 <= minimum <= 100 for enabled, weight, minimum in raw_dimensions.values()):
-            return RedirectResponse("/settings", status_code=303)
+            return RedirectResponse("/settings?notice=" + quote("Score values must be between 0 and 100; nothing was changed."), status_code=303)
         configs = {
             name: DimensionConfig(enabled=enabled == "yes", weight=weight, minimum=minimum)
             for name, (enabled, weight, minimum) in raw_dimensions.items()
         }
         if not any(config.enabled and config.weight > 0 for config in configs.values()):
-            return RedirectResponse("/settings", status_code=303)
+            return RedirectResponse("/settings?notice=" + quote("Enable at least one scoring dimension with a positive weight."), status_code=303)
         repository.set_setting("application_mode", application_mode)
         repository.set_setting("daily_limit", str(daily_limit))
         repository.set_setting("ai_usage_mode", ai_usage_mode)
         repository.set_setting("scoring_config", dump_configs(configs))
-        repository.save_preferences({"locations": locations.strip(), "work_type": work_type, "keywords": keywords.strip(), "salary_minimum": salary_minimum})
-        return RedirectResponse("/settings", status_code=303)
+        repository.save_preferences({
+            "locations": locations.strip(), "locations_exclude": locations_exclude.strip(),
+            "work_type": work_type, "employment_type": employment_type, "schedule": schedule,
+            "keywords": keywords.strip(), "search_terms_include": search_terms_include.strip(),
+            "search_terms_exclude": search_terms_exclude.strip(), "title_include": title_include.strip(),
+            "title_exclude": title_exclude.strip(), "industries": industries.strip(),
+            "employer_include": employer_include.strip(), "employer_exclude": employer_exclude.strip(),
+            "salary_minimum": salary_minimum, "radius_km": radius_km,
+            "include_public_sector": include_public_sector, "include_recruitment_agencies": include_recruitment_agencies,
+        })
+        return RedirectResponse("/settings?notice=" + quote("Your search and review settings were saved."), status_code=303)
 
     @app.post("/settings/cache/clear")
     def clear_semantic_cache() -> RedirectResponse:
         repository.clear_cache()
         return RedirectResponse("/settings?notice=" + quote("Semantic cache cleared."), status_code=303)
+
+    @app.get("/settings/email", response_class=HTMLResponse)
+    def email_settings(notice: str = Query(default="")) -> HTMLResponse:
+        connection = repository.mailbox_connection()
+        encrypted = bool(repository.mailbox_ciphertext())
+        providers = []
+        for provider, label in (("gmail", "Gmail"), ("microsoft", "Microsoft Outlook")):
+            try:
+                OAuthConfig.from_environment(provider)
+                configured = True
+            except EmailIntegrationError:
+                configured = False
+            state = "Connected" if connection and connection["provider"] == provider else ("Ready to connect" if configured and encrypted else "Setup needed")
+            if connection and connection["provider"] == provider:
+                action = ""
+            elif connection:
+                action = "<p>Disconnect the current mailbox before switching providers.</p>"
+            else:
+                action = f"<form method='post' action='/email/connect/{provider}'><button {'disabled' if not (configured and encrypted) else ''}>Connect {label}</button></form>"
+            providers.append(f"<article class='metric-card'><span>{label}</span><strong>{state}</strong>{action}</article>")
+        connected = f"<p class='notice'>Connected provider: {escape(str(connection['provider']).title())}. Only mailbox metadata/snippets are synced.</p><form method='post' action='/email/sync'><button>Check for application replies</button></form><form method='post' action='/email/disconnect'><button class='danger'>Disconnect and delete synced message metadata</button></form>" if connection else "<p>Connect an inbox to spot likely employer responses. Sync is read-only and checks up to 50 recent messages.</p>"
+        application_options = "".join(f"<option value='{item['id']}'>Application #{item['id']} — {escape(str(item['status']))}</option>" for item in repository.rows("applications"))
+        messages = repository.mailbox_messages(include_reviewed=False)
+        def render_message(item: dict[str, object]) -> str:
+            link = str(item["link"])
+            link_parts = urlsplit(link)
+            open_link = f"<a href='{escape(link)}' target='_blank' rel='noopener noreferrer'>Open in mailbox</a>" if link_parts.scheme == "https" and link_parts.hostname in {"mail.google.com", "outlook.office.com", "outlook.live.com"} else ""
+            return f"<article class='metric-card'><span>{escape(str(item['received_at']))} · {escape(str(item['sender']))}</span><h3>{escape(str(item['subject']))}</h3><p>{escape(str(item['snippet']))}</p>{open_link}<form method='post' action='/email/messages/{item['id']}/confirm'><label>Related application <select name='application_id' required><option value=''>Choose one</option>{application_options}</select></label><label>Confirm outcome <select name='status'><option>APPLICATION_RECEIVED</option><option>INTERVIEW</option><option>ASSESSMENT</option><option>OFFER</option><option>REJECTED</option></select></label><button>Confirm and update tracker</button></form></article>"
+
+        message_cards = "".join(render_message(item) for item in messages) or "<p class='empty-state'>No unreviewed likely job responses. Sync the inbox after you have applied.</p>"
+        message = f"<p class='notice' role='status'>{escape(notice)}</p>" if notice else ""
+        setup = "<p class='notice'>Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, MICROSOFT_CLIENT_ID, MICROSOFT_CLIENT_SECRET and SAMPOAGENT_TOKEN_ENCRYPTION_KEY in your local environment. Register the exact callback URLs shown in .env.example. Secrets are never entered in this page.</p>"
+        return _page("Email", f"<section><h2>Read-only inbox connection</h2><p>Authorize only the inbox you want SampoAgent to check. The app does not send, move, or delete email. Detected replies are suggestions until you confirm them.</p>{message}{setup}<div class='metric-grid'>{''.join(providers)}</div>{connected}</section><section><h2>Review possible application replies</h2>{message_cards}</section>", path="/settings/email")
+
+    @app.post("/email/connect/{provider}")
+    def connect_email(provider: str):
+        try:
+            config = OAuthConfig.from_environment(provider)
+            encrypt_token_payload({"setup_check": True})
+        except EmailIntegrationError as exc:
+            return RedirectResponse("/settings/email?notice=" + quote(str(exc)), status_code=303)
+        state = secrets.token_urlsafe(32)
+        verifier, challenge = create_pkce_pair()
+        app.state.email_oauth_states = {key: value for key, value in app.state.email_oauth_states.items() if float(value.get("expires_at", 0)) >= time.time()}
+        app.state.email_oauth_states[state] = {"provider": provider, "verifier": verifier, "expires_at": time.time() + 600}
+        response = RedirectResponse(authorization_url(config, state=state, challenge=challenge), status_code=303)
+        response.set_cookie("sampoagent_email_oauth_state", state, httponly=True, samesite="lax", secure=False, max_age=600, path=f"/email/callback/{provider}")
+        return response
+
+    @app.get("/email/callback/{provider}")
+    def email_callback(provider: str, request: Request):
+        state = request.query_params.get("state", "")
+        cookie_state = request.cookies.get("sampoagent_email_oauth_state", "")
+        pending = app.state.email_oauth_states.pop(state, None) if state and cookie_state and hmac.compare_digest(state, cookie_state) else None
+        if not pending or pending.get("provider") != provider or float(pending.get("expires_at", 0)) < time.time():
+            response = RedirectResponse("/settings/email?notice=" + quote("Email authorization expired or did not match this browser. Start again."), status_code=303)
+        elif request.query_params.get("error"):
+            response = RedirectResponse("/settings/email?notice=" + quote("Email authorization was cancelled."), status_code=303)
+        elif not request.query_params.get("code"):
+            response = RedirectResponse("/settings/email?notice=" + quote("Email provider returned no authorization code."), status_code=303)
+        else:
+            try:
+                config = OAuthConfig.from_environment(provider)
+                tokens = exchange_code(config, code=request.query_params["code"], verifier=str(pending["verifier"]))
+                if not tokens.get("refresh_token"):
+                    raise EmailIntegrationError("Provider did not issue offline refresh access. Re-authorize and approve continued read-only access.")
+                tokens["expires_at"] = time.time() + float(tokens.get("expires_in", 3600))
+                repository.save_mailbox_connection(provider, encrypt_token_payload(tokens))
+                response = RedirectResponse("/settings/email?notice=" + quote("Mailbox connected securely."), status_code=303)
+            except (EmailIntegrationError, TypeError, ValueError):
+                response = RedirectResponse("/settings/email?notice=" + quote("Could not finish email authorization. Check local provider setup and try again."), status_code=303)
+        response.delete_cookie("sampoagent_email_oauth_state", path=f"/email/callback/{provider}")
+        return response
+
+    @app.post("/email/sync")
+    def sync_email() -> RedirectResponse:
+        connection = repository.mailbox_connection()
+        ciphertext = repository.mailbox_ciphertext()
+        if not connection or not ciphertext:
+            return RedirectResponse("/settings/email?notice=" + quote("Connect an email account first."), status_code=303)
+        try:
+            tokens = decrypt_token_payload(ciphertext)
+            if float(tokens.get("expires_at", 0)) <= time.time() + 60:
+                config = OAuthConfig.from_environment(str(connection["provider"]))
+                refresh = str(tokens.get("refresh_token", ""))
+                if not refresh:
+                    raise EmailIntegrationError("Authorization expired. Reconnect the mailbox.")
+                tokens = refresh_access_token(config, refresh_token=refresh)
+                tokens["expires_at"] = time.time() + float(tokens.get("expires_in", 3600))
+                repository.save_mailbox_connection(str(connection["provider"]), encrypt_token_payload(tokens))
+            messages = fetch_recent_messages(str(connection["provider"]), str(tokens["access_token"]), limit=50)
+            repository.store_mailbox_messages(str(connection["provider"]), messages)
+        except (EmailIntegrationError, KeyError, TypeError, ValueError) as exc:
+            return RedirectResponse("/settings/email?notice=" + quote(str(exc)), status_code=303)
+        return RedirectResponse("/settings/email?notice=" + quote(f"Inbox checked. {len(messages)} possible job replies are ready for review."), status_code=303)
+
+    @app.post("/email/disconnect")
+    def disconnect_email() -> RedirectResponse:
+        repository.remove_mailbox_connection()
+        return RedirectResponse("/settings/email?notice=" + quote("Mailbox disconnected and synced metadata removed."), status_code=303)
+
+    @app.post("/email/messages/{message_id}/confirm")
+    def confirm_email_response(message_id: int, application_id: int = Form(...), status: str = Form(...)) -> RedirectResponse:
+        try:
+            repository.confirm_mailbox_response(message_id, application_id, status)
+        except ValueError as exc:
+            return RedirectResponse("/settings/email?notice=" + quote(str(exc)), status_code=303)
+        return RedirectResponse("/settings/email?notice=" + quote("Application tracker updated from the response you confirmed."), status_code=303)
 
     @app.get("/cvs", response_class=HTMLResponse)
     def cvs(job_id: int | None = Query(default=None)) -> HTMLResponse:

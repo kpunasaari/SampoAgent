@@ -31,6 +31,21 @@ def _enabled(row: Mapping[str, object]) -> bool:
     return value not in (False, 0, "0", "false", "False")
 
 
+def eligible_sources(sources: Sequence[Mapping[str, object]], preferences: Mapping[str, object]) -> tuple[Mapping[str, object], ...]:
+    """Apply explicit source-category switches without guessing from source URLs."""
+    result = []
+    for source in sources:
+        if not _enabled(source):
+            continue
+        source_type = str(source.get("source_type", "")).casefold()
+        if preferences.get("include_public_sector", "yes") == "no" and "public-sector" in source_type:
+            continue
+        if preferences.get("include_recruitment_agencies", "yes") == "no" and "recruitment agency" in source_type:
+            continue
+        result.append(source)
+    return tuple(result)
+
+
 def _unique(values: Sequence[str]) -> tuple[str, ...]:
     result: list[str] = []
     seen: set[str] = set()
@@ -111,12 +126,17 @@ def build_search_plan(
     for recommendation in recommend_occupations(confirmed_skills, ignored=[]):
         terms.extend((recommendation.title_fi, recommendation.title_en))
 
-    terms.extend(_locations(preferences.get("search_terms_include", "")))
-    excluded_terms = {term.casefold() for term in _locations(preferences.get("search_terms_exclude", ""))}
+    for key in ("keywords", "search_terms_include", "title_include", "industries", "employer_include"):
+        terms.extend(_locations(preferences.get(key, "")))
+    excluded_terms = {
+        term.casefold()
+        for key in ("search_terms_exclude", "title_exclude", "employer_exclude")
+        for term in _locations(preferences.get(key, ""))
+    }
     unique_terms = tuple(term for term in _unique(terms) if term.casefold() not in excluded_terms)
     locations = _locations(preferences.get("locations", ""))
     location_options = locations or ("",)
-    active_sources = [source for source in sources if _enabled(source)]
+    active_sources = eligible_sources(sources, preferences)
     queries: list[SearchQuery] = []
     bound = max(0, max_queries)
     for source in active_sources:

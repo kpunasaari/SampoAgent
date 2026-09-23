@@ -4,4 +4,8 @@ SampoAgent is a single-process FastAPI application using a local SQLite database
 
 Country packs provide data and terminology only; Finland is implemented in `sampoagent/country_packs/finland`. Browser automation is behind `BrowserAgent`, so a Codex or Claude adapter can be added without coupling core application logic to either provider. AI providers remain optional and should receive only normalized, relevant context.
 
-SQLite tables cover profile, facts, career profiles, sources, jobs, applications, settings, documents, audit activity, and semantic cache. The UI is server-rendered FastAPI HTML and requires no Node build process.
+SQLite tables cover profile, facts, career profiles, sources, jobs, applications, settings, documents, audit activity, semantic cache, discovery runs, and optional encrypted mailbox connections/messages. The UI is server-rendered FastAPI HTML and requires no Node build process.
+
+Job discovery is profile-led and deterministic. Confirmed candidate experience, explicit target occupations, and saved filters create a bounded set of source-scoped search links. Automatic retrieval is limited to user-enabled public RSS/Atom/JSON feeds and the official Job Market Finland P67 API when its KIPA key is configured. Feed retrieval validates HTTPS/public DNS destinations, follows robots.txt, enforces time/response-size bounds, rejects unsafe redirects, and records source attribution. Other sources stay browser-only; no proxy, CAPTCHA solver, browser fingerprinting, or login bypass is used.
+
+Email integration is opt-in and uses delegated read-only Gmail/Microsoft OAuth with PKCE and one-time state. Tokens are Fernet-encrypted in SQLite using an operator-managed local key. Sync stores a bounded set of likely response message metadata/snippets; it does not send or modify mail or application state. The user explicitly confirms a suggested message-to-application match and outcome.

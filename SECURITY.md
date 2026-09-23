@@ -3,3 +3,5 @@
 SampoAgent is designed for local use. The server binds to `127.0.0.1`; do not expose it to an untrusted network. Candidate data, CVs, and generated documents are private local data and must never be committed. `.gitignore` excludes databases, uploads, generated application data, and environment files.
 
 The app does not store provider keys in SQLite. It rejects unsupported uploads, preserves provenance, and requires user action for unknown or high-risk application answers. It does not circumvent CAPTCHA, login, robots rules, or access controls. Please report vulnerabilities privately to the maintainer before public disclosure.
+
+Optional Gmail/Outlook connection uses read-only delegated scopes. Access and refresh tokens are encrypted with the local `SAMPOAGENT_TOKEN_ENCRYPTION_KEY` before SQLite storage. Message sync is bounded and stores only provider ID, sender, subject, snippet, date, and the provider's message link. Sync never changes an application status; a user explicitly confirms the message/application/outcome. Disconnect deletes stored token ciphertext and synced message metadata. Losing the encryption key prevents token recovery.

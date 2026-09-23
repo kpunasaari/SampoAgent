@@ -82,6 +82,7 @@ def test_browser_search_links_are_domain_scoped_and_encoded() -> None:
 
     assert plan.queries
     assert all(query.search_url.startswith("https://www.google.com/search?q=") for query in plan.queries)
+    assert all(query.language in {"fi", "en"} for query in plan.queries)
     assert all("site%3Awww.duunitori.fi" in query.search_url for query in plan.queries)
     assert all("Espoo+%26+Vantaa" in query.search_url for query in plan.queries)
 

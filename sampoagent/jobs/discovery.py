@@ -5,6 +5,7 @@ from typing import Mapping, Sequence
 from urllib.parse import quote_plus, urlsplit
 
 from sampoagent.careers.recommendations import recommend_occupations
+from sampoagent.jobs.service import detect_language
 
 
 @dataclass(frozen=True)
@@ -12,6 +13,7 @@ class SearchQuery:
     source_id: int
     source_name: str
     phrase: str
+    language: str
     location: str
     search_url: str
     capability: str
@@ -130,6 +132,7 @@ def build_search_plan(
                         source_id=int(source.get("id", 0)),
                         source_name=str(source.get("name", "Job source")),
                         phrase=phrase,
+                        language=detect_language(phrase),
                         location=location,
                         search_url=_search_url(source_url, phrase, location),
                         capability=str(source.get("capability", "Browser search only")),

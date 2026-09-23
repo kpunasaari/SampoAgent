@@ -10,7 +10,7 @@ requires-python = ">=3.11"
 license = { file = "LICENSE" }
 authors = [{ name = "Kai Punasaari" }]
 classifiers = ["License :: OSI Approved :: Apache Software License"]
-dependencies = ["fastapi>=0.110", "uvicorn>=0.27", "pypdf>=4", "python-docx>=1", "reportlab>=4", "python-multipart>=0.0.9"]
+dependencies = ["fastapi>=0.110", "uvicorn>=0.27", "pypdf>=4", "python-docx>=1", "reportlab>=4", "python-multipart>=0.0.9", "cryptography>=42", "python-dotenv>=1.0", "scrapling>=0.4.15,<0.5"]
 
 [project.scripts]
 sampoagent = "sampoagent.cli:main"

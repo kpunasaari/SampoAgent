@@ -2,7 +2,7 @@ def test_profile_can_correct_an_extracted_fact_before_using_it() -> None:
     from fastapi.testclient import TestClient
     from sampoagent.app.main import create_app
 
-    client = TestClient(create_app(database_path=":memory:"))
+    client = TestClient(create_app(database_path=":memory:", demo_data=True))
     client.post(
         "/cvs/upload",
         files={"file": ("candidate.txt", b"Skills: Warehousing", "text/plain")},

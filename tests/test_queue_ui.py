@@ -2,7 +2,7 @@ def test_queue_can_prepare_application_without_final_submission() -> None:
     from fastapi.testclient import TestClient
     from sampoagent.app.main import create_app
 
-    client = TestClient(create_app(database_path=":memory:"))
+    client = TestClient(create_app(database_path=":memory:", demo_data=True))
     response = client.post("/queue/prepare/1", follow_redirects=True)
 
     assert response.status_code == 200
@@ -15,7 +15,7 @@ def test_application_status_can_be_marked_manually_applied() -> None:
     from fastapi.testclient import TestClient
     from sampoagent.app.main import create_app
 
-    client = TestClient(create_app(database_path=":memory:"))
+    client = TestClient(create_app(database_path=":memory:", demo_data=True))
     client.post("/queue/prepare/1")
     response = client.post("/applications/1/status", data={"status": "APPLIED", "note": "Applied by candidate"}, follow_redirects=True)
 
@@ -27,7 +27,7 @@ def test_queue_refuses_job_with_missing_mandatory_requirement() -> None:
     from fastapi.testclient import TestClient
     from sampoagent.app.main import create_app
 
-    client = TestClient(create_app(database_path=":memory:"))
+    client = TestClient(create_app(database_path=":memory:", demo_data=True))
     imported = client.post(
         "/jobs/import",
         data={
@@ -52,7 +52,7 @@ def test_queue_refuses_duplicate_application_record() -> None:
     from fastapi.testclient import TestClient
     from sampoagent.app.main import create_app
 
-    client = TestClient(create_app(database_path=":memory:"))
+    client = TestClient(create_app(database_path=":memory:", demo_data=True))
     first = client.post("/queue/prepare/1", follow_redirects=True)
     second = client.post("/queue/prepare/1", follow_redirects=True)
 
@@ -65,7 +65,7 @@ def test_daily_limit_prevents_manual_applied_status() -> None:
     from fastapi.testclient import TestClient
     from sampoagent.app.main import create_app
 
-    client = TestClient(create_app(database_path=":memory:"))
+    client = TestClient(create_app(database_path=":memory:", demo_data=True))
     client.post("/settings", data={"application_mode": "review_everything", "daily_limit": "1", "ai_usage_mode": "minimal"})
     client.post("/queue/prepare/1")
     client.post("/queue/prepare/2")

@@ -16,6 +16,10 @@ class NormalizedJob:
     language: str
     application_url: str
     fingerprint: str
+    source_id: int | None = None
+    source_name: str = ""
+    source_url: str = ""
+    deadline: date | None = None
 
 
 def detect_language(text: str) -> str:

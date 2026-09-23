@@ -2,7 +2,7 @@ def test_profile_can_store_structured_candidate_records() -> None:
     from fastapi.testclient import TestClient
     from sampoagent.app.main import create_app
 
-    client = TestClient(create_app(database_path=":memory:"))
+    client = TestClient(create_app(database_path=":memory:", demo_data=True))
     response = client.post(
         "/profile/records",
         data={"record_type": "licence", "title": "B-ajokortti", "details": "Valid driving licence"},
@@ -18,7 +18,7 @@ def test_directly_entered_licence_satisfies_job_requirement() -> None:
     from fastapi.testclient import TestClient
     from sampoagent.app.main import create_app
 
-    client = TestClient(create_app(database_path=":memory:"))
+    client = TestClient(create_app(database_path=":memory:", demo_data=True))
     client.post("/profile/records", data={"record_type": "licence", "title": "B-ajokortti", "details": ""})
     client.post(
         "/jobs/import",

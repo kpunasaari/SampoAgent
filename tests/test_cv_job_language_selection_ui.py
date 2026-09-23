@@ -3,7 +3,7 @@ def test_selected_job_prefills_its_language_for_cv_generation() -> None:
 
     from sampoagent.app.main import create_app
 
-    client = TestClient(create_app(database_path=":memory:"))
+    client = TestClient(create_app(database_path=":memory:", demo_data=True))
     response = client.get("/cvs?job_id=2")
 
     assert response.status_code == 200

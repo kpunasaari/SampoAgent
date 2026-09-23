@@ -336,34 +336,36 @@ def create_app(database_path: str | Path = "sampoagent.db", *, demo_data: bool =
         all_source_rows = repository.rows("job_sources")
         search_key = q.strip().casefold()
         visible_source_rows = [source for source in all_source_rows if not search_key or search_key in " ".join(str(source.get(key, "")) for key in ("name", "url", "source_type", "country", "capability", "notes")).casefold()]
-        capabilities = ("Browser search only", "RSS/Atom feed", "JSON Feed", "Job Market Finland API")
+        capabilities = ("Browser search only", "RSS/Atom feed", "JSON Feed", "Job Market Finland API", "Scrapling public page")
         def capability_options(selected: str) -> str:
             return "".join(f"<option value='{escape(value)}{' selected' if value == selected else ''}'>{escape(value)}</option>" for value in capabilities)
         rows = "".join(
             f"<tr><td><strong>{escape(str(source['name']))}</strong><br>{escape(str(source['notes']))}</td><td>{escape(str(source['source_type']))}<br>{escape(str(source['country']))}</td><td>{escape(str(source['capability']))}<br>{escape(source_health(str(source['url']), str(source['capability'])))}</td><td>{escape(str(latest_results.get(int(source['id']), {}).get('status', 'Not checked')))} · {int(latest_results.get(int(source['id']), {}).get('jobs_found', 0))} found / {int(latest_results.get(int(source['id']), {}).get('imported_count', 0))} added</td><td>{'Active' if source['enabled'] else 'Inactive'} <form style='display:inline' method='post' action='/sources/{source['id']}/toggle'><button class='secondary'>{'Disable' if source['enabled'] else 'Enable'}</button></form></td><td><details><summary>Edit source</summary><form method='post' action='/sources/{source['id']}/edit'><label>Name <input name='name' value='{escape(str(source['name']))}' required></label><label>URL <input name='url' type='url' value='{escape(str(source['url']))}' required></label><label>Country <input name='country' value='{escape(str(source['country']))}' required></label><label>Type <select name='source_type'><option>{escape(str(source['source_type']))}</option><option>job board</option><option>public-sector board</option><option>recruitment agency</option><option>employer career site</option><option>custom</option></select></label><label>How to search <select name='capability'>{capability_options(str(source['capability']))}</select></label><label>Notes <input name='notes' value='{escape(str(source['notes']))}'></label><button>Save source</button></form><form method='post' action='/sources/{source['id']}/delete' onsubmit=\"return confirm('Remove this source? Previously imported jobs keep their source details.')\"><button class='danger'>Remove source</button></form></details></td></tr>"
             for source in visible_source_rows
         ) or "<tr><td colspan='6'>No matching sources. Adjust the search or add a source.</td></tr>"
-        form = f"<form method='post' action='/sources'><label>Name <input name='name' required></label> <label>URL <input name='url' type='url' placeholder='https://example.org/careers' required></label> <label>Country <input name='country' value='Finland' required></label> <label>Type <select name='source_type'><option>job board</option><option>public-sector board</option><option>recruitment agency</option><option>employer career site</option><option>custom</option></select></label> <label>How to search <select name='capability'>{capability_options('Browser search only')}</select></label> <label>Notes <input name='notes'></label> <button>Add source</button></form>"
+        selector_field = "<label>Job card CSS selector <input name='listing_selector' maxlength='200' placeholder=\"li.job-card\"></label>"
+        rows = rows.replace("</select></label><label>Notes <input name='notes' value=", f"</select></label>{selector_field}<label>Notes <input name='notes' value=")
+        form = f"<form method='post' action='/sources'><label>Name <input name='name' required></label> <label>URL <input name='url' type='url' placeholder='https://example.org/careers' required></label> <label>Country <input name='country' value='Finland' required></label> <label>Type <select name='source_type'><option>job board</option><option>public-sector board</option><option>recruitment agency</option><option>employer career site</option><option>custom</option></select></label> <label>How to search <select name='capability'>{capability_options('Browser search only')}</select></label> {selector_field}<label>Notes <input name='notes'></label> <button>Add source</button></form>"
         catalogue = " · ".join(source.name for source in builtin_sources())
         builtins = "<form method='post' action='/sources/builtin'><button>Add missing Finland sources</button></form>"
         message = f"<p class='notice' role='status'>{escape(notice)}</p>" if notice else ""
         search_form = f"<form method='get' action='/sources'><label>Find a source <input name='q' value='{escape(q)}' placeholder='Search by name, type, country'></label><button class='secondary'>Search</button></form><p>{len(visible_source_rows)} of {len(all_source_rows)} sources</p>"
-        return _page("Sources", f"<section><h2>Control what SampoAgent can search</h2><p>Protected or interactive websites are browser-only. Only explicitly marked public feeds and the official Job Market Finland API are checked automatically. CAPTCHA/proxy bypass is never used.</p>{message}{form}{builtins}<p class='notice'>Finland catalogue: {escape(catalogue)}</p></section><section>{search_form}<table><tr><th>Source</th><th>Category</th><th>Capability</th><th>Last scan</th><th>State</th><th>Manage</th></tr>{rows}</table></section>")
+        return _page("Sources", f"<section><h2>Control what SampoAgent can search</h2><p>Scrapling uses its standard parser on explicitly selected public pages; configure a job-card CSS selector if the page has no JobPosting JSON-LD. Requests respect robots.txt and stop on access denials. Protected or interactive websites remain browser-only; CAPTCHA/proxy bypass is never used.</p>{message}{form}{builtins}<p class='notice'>Finland catalogue: {escape(catalogue)}</p></section><section>{search_form}<table><tr><th>Source</th><th>Category</th><th>Capability</th><th>Last scan</th><th>State</th><th>Manage</th></tr>{rows}</table></section>")
 
     @app.post("/sources")
-    def add_source(name: str = Form(...), url: str = Form(...), country: str = Form(...), source_type: str = Form(...), capability: str = Form("Browser search only"), notes: str = Form("")) -> RedirectResponse:
+    def add_source(name: str = Form(...), url: str = Form(...), country: str = Form(...), source_type: str = Form(...), capability: str = Form("Browser search only"), notes: str = Form(""), listing_selector: str = Form("")) -> RedirectResponse:
         try:
-            repository.add_source(name=name, url=url, country=country, source_type=source_type, notes=notes, capability=capability)
+            repository.add_source(name=name, url=url, country=country, source_type=source_type, notes=notes, capability=capability, listing_selector=listing_selector)
         except ValueError as exc:
             return RedirectResponse("/sources?notice=" + quote(str(exc)), status_code=303)
         return RedirectResponse("/sources", status_code=303)
 
     @app.post("/sources/{source_id}/edit")
-    def edit_source(source_id: int, name: str = Form(...), url: str = Form(...), country: str = Form(...), source_type: str = Form(...), capability: str = Form(...), notes: str = Form("")) -> RedirectResponse:
+    def edit_source(source_id: int, name: str = Form(...), url: str = Form(...), country: str = Form(...), source_type: str = Form(...), capability: str = Form(...), notes: str = Form(""), listing_selector: str = Form("")) -> RedirectResponse:
         if not repository.source(source_id):
             return RedirectResponse("/sources?notice=" + quote("Source was not found."), status_code=303)
         try:
-            repository.update_source(source_id, name=name, url=url, country=country, source_type=source_type, notes=notes, capability=capability)
+            repository.update_source(source_id, name=name, url=url, country=country, source_type=source_type, notes=notes, capability=capability, listing_selector=listing_selector)
         except ValueError as exc:
             return RedirectResponse("/sources?notice=" + quote(str(exc)), status_code=303)
         return RedirectResponse("/sources?notice=" + quote("Source settings saved."), status_code=303)

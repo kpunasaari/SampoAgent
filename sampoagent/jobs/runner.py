@@ -8,6 +8,7 @@ from sampoagent.jobs.adapters import (
     JobMarketFinlandAdapter,
     JsonFeedAdapter,
     RssAtomAdapter,
+    ScraplingAdapter,
     SourceAdapterError,
 )
 from sampoagent.jobs.discovery import SearchPlan, build_search_plan, eligible_sources
@@ -52,12 +53,14 @@ def is_relevant_job(job: Any, *, plan: SearchPlan, preferences: dict[str, object
     return any(_term_matches(term, text) for term in plan.terms)
 
 
-def _supported_adapter(capability: str, *, rss_adapter: Any, json_adapter: Any, api_adapter: Any) -> Any | None:
+def _supported_adapter(capability: str, *, rss_adapter: Any, json_adapter: Any, api_adapter: Any, scrapling_adapter: Any) -> Any | None:
     value = capability.casefold()
     if "browser search only" in value:
         return None
     if "job market finland api" in value:
         return api_adapter
+    if "scrapling public page" in value:
+        return scrapling_adapter
     if "json" in value and "feed" in value:
         return json_adapter
     if "rss" in value or "atom" in value:
@@ -71,6 +74,7 @@ def run_discovery(
     rss_adapter: Any | None = None,
     json_adapter: Any | None = None,
     api_adapter: Any | None = None,
+    scrapling_adapter: Any | None = None,
     max_queries: int = 120,
 ) -> DiscoveryReport:
     """Run only explicitly enabled, supported sources and persist outcomes.
@@ -80,6 +84,7 @@ def run_discovery(
     """
     rss_adapter = rss_adapter or RssAtomAdapter()
     json_adapter = json_adapter or JsonFeedAdapter()
+    scrapling_adapter = scrapling_adapter or ScraplingAdapter()
     all_sources = repository.rows("job_sources")
     facts = repository.rows("facts")
     record_types = ("experience", "education", "certificate", "licence", "language", "availability")
@@ -102,7 +107,7 @@ def run_discovery(
         name = str(source.get("name", "Job source"))
         url = str(source.get("url", ""))
         capability = str(source.get("capability", "Browser search only"))
-        adapter = _supported_adapter(capability, rss_adapter=rss_adapter, json_adapter=json_adapter, api_adapter=api_adapter)
+        adapter = _supported_adapter(capability, rss_adapter=rss_adapter, json_adapter=json_adapter, api_adapter=api_adapter, scrapling_adapter=scrapling_adapter)
         found = imported_here = duplicates_here = 0
         if "browser search only" in capability.casefold():
             status = "browser_only"

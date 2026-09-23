@@ -37,6 +37,7 @@ To preview clearly synthetic example data instead, run `sampoagent demo` once be
 ## Current V1 scope
 
 - Finland country pack with a built-in source catalog. Each source is labeled with its real discovery capability; protected sources remain browser-only.
+- Optional Scrapling adapter for static public pages using JSON-LD JobPosting data or a user-provided job-card CSS selector; robots policy and access-control failures are respected.
 - Separate Finnish and English CV labels and template selection.
 - Deterministic matching, duplicate detection, language detection, hard blockers, explainable three-part scoring.
 - Confirmed-fact-only PDF CV output and ATS text re-parse validation.
@@ -53,6 +54,8 @@ forms. It works without a Node or browser build step.
 Candidate data is stored in local SQLite. No AI key is required: Minimal deterministic mode is the default. Live job discovery requires a permitted public feed or an activated official API; browser-only sources remain personalized links. Gmail/Outlook OAuth credentials are supplied by the operator, and mailbox tokens are encrypted before local persistence. Final web-form submission may require user action for authentication, CAPTCHAs, or high-risk questions.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md), [SECURITY.md](SECURITY.md), and [docs/CLAUDE_INTEGRATION.md](docs/CLAUDE_INTEGRATION.md). Contributions are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+Scrapling is an external BSD-3-Clause dependency; this project uses its static parser only. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Licence
 

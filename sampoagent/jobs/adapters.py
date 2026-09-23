@@ -19,7 +19,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import replace
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 from urllib.robotparser import RobotFileParser
 import xml.etree.ElementTree as ET
@@ -440,6 +440,132 @@ class JsonFeedAdapter:
                     deadline=item.get("expires") or item.get("valid_through"),
                     language=str(item.get("language", ""))[:2] or None,
                 )
+            except SourceAdapterError:
+                continue
+            if job:
+                jobs.append(job)
+        return jobs
+
+
+def _selector_values(element: Any, selector: str) -> list[str]:
+    selected = element.css(selector)
+    values = selected.getall() if hasattr(selected, "getall") else list(selected)
+    return [_plain_text(str(value)) for value in values if value is not None and str(value).strip()]
+
+
+def _jsonld_jobpostings(values: list[str]) -> list[Mapping[str, object]]:
+    postings: list[Mapping[str, object]] = []
+
+    def visit(value: object) -> None:
+        if isinstance(value, list):
+            for item in value:
+                visit(item)
+        elif isinstance(value, dict):
+            types = value.get("@type", [])
+            if isinstance(types, str):
+                types = [types]
+            if isinstance(types, list) and any(str(item).casefold() == "jobposting" for item in types):
+                postings.append(value)
+            if "@graph" in value:
+                visit(value["@graph"])
+
+    for raw in values:
+        try:
+            visit(json.loads(raw))
+        except (json.JSONDecodeError, TypeError):
+            continue
+    return postings
+
+
+def _jsonld_location(value: object) -> str:
+    if isinstance(value, list):
+        return "; ".join(filter(None, (_jsonld_location(item) for item in value)))
+    if not isinstance(value, Mapping):
+        return str(value or "").strip()
+    address = value.get("address", value)
+    if isinstance(address, Mapping):
+        parts = [address.get(key) for key in ("addressLocality", "addressRegion", "addressCountry")]
+        return ", ".join(str(part.get("name", "") if isinstance(part, Mapping) else part).strip() for part in parts if part)
+    return str(address or "").strip()
+
+
+class ScraplingAdapter:
+    """Use Scrapling's static CSS parser on explicitly selected public HTML pages."""
+
+    DEFAULT_CARD_SELECTOR = "article, li[class*='job'], div[class*='job-card'], div[class*='job-listing'], [data-job-id]"
+
+    def __init__(self, *, fetcher: FeedFetcher | None = None, selector_factory: Callable[[str], Any] | None = None) -> None:
+        self.fetcher = fetcher
+        self.selector_factory = selector_factory
+
+    def _selector(self, html: str) -> Any:
+        if self.selector_factory:
+            return self.selector_factory(html)
+        try:
+            from scrapling.parser import Selector
+        except ImportError as exc:
+            raise SourceAdapterError("Scrapling parser is not installed. Reinstall SampoAgent dependencies to enable this source.") from exc
+        return Selector(html)
+
+    def search(
+        self,
+        source: Mapping[str, object],
+        query: object | None = None,
+        *,
+        timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+        max_bytes: int = MAX_RESPONSE_BYTES,
+    ) -> list[NormalizedJob]:
+        del query
+        if "scrapling public page" not in _capability(source):
+            raise SourceAdapterError("Source is not configured for the Scrapling public-page adapter.")
+        url = _source_value(source, "url")
+        validate_remote_url(url, allow_http_loopback=False)
+        try:
+            payload = self.fetcher(url, timeout_seconds, max_bytes) if self.fetcher else _fetch_url(url, timeout_seconds, max_bytes, check_robots=True)
+        except SourceAdapterError:
+            raise
+        except Exception as exc:
+            raise SourceAdapterError("Public job page could not be fetched; access was not retried or bypassed.") from exc
+        if len(payload) > max_bytes:
+            raise SourceAdapterError("Scrapling page exceeded the configured size limit.")
+        try:
+            page = self._selector(payload.decode("utf-8", errors="replace"))
+        except SourceAdapterError:
+            raise
+        except Exception as exc:
+            raise SourceAdapterError("Scrapling could not parse the public job page.") from exc
+
+        jobs: list[NormalizedJob] = []
+        for item in _jsonld_jobpostings(_selector_values(page, 'script[type="application/ld+json"]::text'))[:250]:
+            organization = item.get("hiringOrganization", {})
+            company = organization.get("name", "") if isinstance(organization, Mapping) else str(organization or "")
+            try:
+                job = _build_job(
+                    title=str(item.get("title", "")), company=str(company),
+                    location=_jsonld_location(item.get("jobLocation", "")),
+                    description=_plain_text(str(item.get("description", ""))),
+                    application_url=urljoin(url, str(item.get("url") or item.get("applicationUrl") or "")),
+                    source=source, deadline=item.get("validThrough"),
+                )
+            except SourceAdapterError:
+                continue
+            if job:
+                jobs.append(job)
+        if jobs:
+            return jobs
+
+        card_selector = _source_value(source, "listing_selector") or self.DEFAULT_CARD_SELECTOR
+        cards = page.css(card_selector)
+        for card in list(cards)[:250]:
+            try:
+                title = " ".join(_selector_values(card, "h1::text, h2::text, h3::text, [class*='title']::text"))
+                links = _selector_values(card, "a::attr(href)")
+                apply_url = urljoin(url, links[0]) if links else ""
+                company = " ".join(_selector_values(card, "[class*='company']::text, [class*='employer']::text"))
+                location = " ".join(_selector_values(card, "[class*='location']::text"))
+                description = " ".join(_selector_values(card, "[class*='description']::text, p::text"))
+                deadline = " ".join(_selector_values(card, "[class*='deadline']::text, time::attr(datetime)"))
+                job = _build_job(title=title, company=company, location=location, description=description, application_url=apply_url, source=source, deadline=deadline)
             except SourceAdapterError:
                 continue
             if job:

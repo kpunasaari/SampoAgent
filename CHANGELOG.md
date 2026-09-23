@@ -12,6 +12,7 @@
 - Added one-click profile-based job discovery, bounded public feed adapters, official Job Market Finland API support when activated, duplicate detection, source snapshots, and personalized browser-search links for all other sources.
 - Added editable/removable job sources, candidate experience records, role targets, and career profiles; expanded job search and matching preferences.
 - Added optional read-only Gmail/Outlook OAuth with PKCE, encrypted local tokens, bounded likely-response sync, and user-confirmed application tracking updates.
+- Added a selectable Scrapling public-page source adapter for JSON-LD and configurable CSS job cards, preserving robots, access-denial, size, timeout, and host-validation boundaries.
 
 ## 0.1.0
 

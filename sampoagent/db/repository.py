@@ -45,6 +45,10 @@ class Repository:
         columns = {row[1] for row in self.connection.execute("PRAGMA table_info(job_sources)")}
         if "notes" not in columns:
             self.connection.execute("ALTER TABLE job_sources ADD COLUMN notes TEXT NOT NULL DEFAULT ''")
+        if "capability" not in columns:
+            self.connection.execute("ALTER TABLE job_sources ADD COLUMN capability TEXT NOT NULL DEFAULT 'Browser search only'")
+        if "listing_selector" not in columns:
+            self.connection.execute("ALTER TABLE job_sources ADD COLUMN listing_selector TEXT NOT NULL DEFAULT ''")
         job_columns = {row[1] for row in self.connection.execute("PRAGMA table_info(jobs)")}
         for name, declaration in (
             ("source_id", "INTEGER"),
@@ -657,34 +661,38 @@ class Repository:
         return [dict(row) for row in rows]
 
     @staticmethod
-    def _validate_source_values(*, name: str, url: str, country: str, source_type: str, capability: str) -> None:
+    def _validate_source_values(*, name: str, url: str, country: str, source_type: str, capability: str, listing_selector: str = "") -> None:
         parsed = urlsplit(url.strip())
         if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
             raise ValueError("Source URL must be a credential-free HTTPS address")
         if not name.strip() or not country.strip() or not source_type.strip():
             raise ValueError("Source name, country, and type are required")
-        if capability not in {"Browser search only", "RSS/Atom feed", "JSON Feed", "Job Market Finland API"}:
+        if capability not in {"Browser search only", "RSS/Atom feed", "JSON Feed", "Job Market Finland API", "Scrapling public page"}:
             raise ValueError("Unsupported source capability")
+        if len(listing_selector.strip()) > 200:
+            raise ValueError("Job card selector must be 200 characters or fewer")
         if capability == "Job Market Finland API" and parsed.hostname not in {"tyomarkkinatori.fi", "www.tyomarkkinatori.fi"}:
             raise ValueError("The official Job Market Finland API source must use tyomarkkinatori.fi")
 
-    def add_source(self, *, name: str, url: str, country: str, source_type: str, notes: str = "", capability: str = "Browser search only") -> int:
+    def add_source(self, *, name: str, url: str, country: str, source_type: str, notes: str = "", capability: str = "Browser search only", listing_selector: str = "") -> int:
         clean_url = url.strip()
-        self._validate_source_values(name=name, url=clean_url, country=country, source_type=source_type, capability=capability)
+        clean_selector = listing_selector.strip()
+        self._validate_source_values(name=name, url=clean_url, country=country, source_type=source_type, capability=capability, listing_selector=clean_selector)
         if self.has_source_url(clean_url):
             raise ValueError("A source with this URL already exists")
-        cursor = self.connection.execute("INSERT INTO job_sources(name, url, country, source_type, notes, capability) VALUES (?, ?, ?, ?, ?, ?)", (name.strip(), clean_url, country.strip(), source_type.strip(), notes.strip(), capability))
+        cursor = self.connection.execute("INSERT INTO job_sources(name, url, country, source_type, notes, capability, listing_selector) VALUES (?, ?, ?, ?, ?, ?, ?)", (name.strip(), clean_url, country.strip(), source_type.strip(), notes.strip(), capability, clean_selector))
         self.log("source_added", name)
         self.connection.commit()
         return int(cursor.lastrowid)
 
-    def update_source(self, source_id: int, *, name: str, url: str, country: str, source_type: str, notes: str, capability: str) -> None:
+    def update_source(self, source_id: int, *, name: str, url: str, country: str, source_type: str, notes: str, capability: str, listing_selector: str = "") -> None:
         clean_url = url.strip()
-        self._validate_source_values(name=name, url=clean_url, country=country, source_type=source_type, capability=capability)
+        clean_selector = listing_selector.strip()
+        self._validate_source_values(name=name, url=clean_url, country=country, source_type=source_type, capability=capability, listing_selector=clean_selector)
         duplicate = self.connection.execute("SELECT 1 FROM job_sources WHERE url=? AND id<>? LIMIT 1", (clean_url, source_id)).fetchone()
         if duplicate:
             raise ValueError("A source with this URL already exists")
-        self.connection.execute("UPDATE job_sources SET name=?, url=?, country=?, source_type=?, notes=?, capability=? WHERE id=?", (name.strip(), clean_url, country.strip(), source_type.strip(), notes.strip(), capability, source_id))
+        self.connection.execute("UPDATE job_sources SET name=?, url=?, country=?, source_type=?, notes=?, capability=?, listing_selector=? WHERE id=?", (name.strip(), clean_url, country.strip(), source_type.strip(), notes.strip(), capability, clean_selector, source_id))
         self.log("source_updated", str(source_id))
         self.connection.commit()
 

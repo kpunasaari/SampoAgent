@@ -134,7 +134,7 @@
 - [ ] Browser-check desktop and narrow widths for onboarding, dashboard, profile, careers, jobs/discovery, sources CRUD, settings, email connection status, queue, and applications.
 - [x] Run full `py -m pytest -q` (153 passed), `py -m compileall -q sampoagent`, CLI help, local route smoke tests, and secret scan.
 - [x] Update docs to distinguish implemented and credential-dependent features; state that API activation and OAuth app registration are external prerequisites.
-- [ ] Review diff, commit coherent changes, push the current GitHub branch, update/create the pull request, and attach its URL.
+- [x] Review diff, commit coherent changes, push branch `dark-modern-ui`, update existing pull request #1, and attach its URL.
 
 ## Completion evidence
 

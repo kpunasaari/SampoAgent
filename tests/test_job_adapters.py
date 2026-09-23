@@ -112,6 +112,36 @@ def test_private_dns_destinations_are_rejected(monkeypatch: pytest.MonkeyPatch) 
         validate_remote_url("https://jobs.example.org/feed")
 
 
+@pytest.mark.parametrize("url", ["https://127.0.0.1/feed", "https://localhost/feed", "https://[::1]/feed"])
+def test_loopback_feed_destinations_are_rejected_by_default(url: str) -> None:
+    from sampoagent.jobs.adapters import validate_remote_url
+
+    with pytest.raises(SourceAdapterError, match="Loopback"):
+        validate_remote_url(url)
+
+
+def test_pinned_https_connection_uses_the_address_that_was_validated(monkeypatch: pytest.MonkeyPatch) -> None:
+    import sampoagent.jobs.adapters as adapters
+
+    connected = []
+    class FakeSocket:
+        pass
+    sock = FakeSocket()
+    monkeypatch.setattr(adapters.socket, "create_connection", lambda address, **kwargs: connected.append((address, kwargs)) or sock)
+    class FakeContext:
+        verify_mode = adapters.ssl.CERT_REQUIRED
+        check_hostname = True
+        def wrap_socket(self, value, *, server_hostname):
+            assert value is sock
+            assert server_hostname == "jobs.example.org"
+            return value
+
+    connection = adapters._PinnedHTTPSConnection("jobs.example.org", "93.184.216.34", context=FakeContext())
+    connection.connect()
+
+    assert connected == [(("93.184.216.34", 443), {"timeout": adapters.socket._GLOBAL_DEFAULT_TIMEOUT, "source_address": None})]
+
+
 def test_robots_denial_stops_before_feed_request(monkeypatch: pytest.MonkeyPatch) -> None:
     import sampoagent.jobs.adapters as adapters
 

@@ -1,0 +1,4 @@
+interface:
+  display_name: "SampoAgent"
+  short_description: "Find jobs and prepare accurate applications"
+  default_prompt: "Use SampoAgent records that are explicitly available, preserve candidate-fact provenance, and help me find and assess suitable jobs. Ask me about missing facts, and get my explicit confirmation before submitting any specific application."

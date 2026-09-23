@@ -8,19 +8,20 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from email.utils import parsedate_to_datetime
+import http.client
 from html.parser import HTMLParser
 import ipaddress
 import json
 import os
 import re
 import socket
+import ssl
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from typing import Any
-from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlsplit, urlunsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, Request
 from urllib.robotparser import RobotFileParser
 import xml.etree.ElementTree as ET
 
@@ -87,8 +88,7 @@ def _is_loopback_host(host: str) -> bool:
         return False
 
 
-def validate_remote_url(url: str, *, allow_http_loopback: bool = True) -> None:
-    """Reject non-web, credential-bearing, private, and unresolved targets."""
+def _resolve_public_addresses(url: str) -> tuple[str, int, tuple[str, ...]]:
     try:
         parsed = urlsplit(url)
         host = parsed.hostname
@@ -97,18 +97,15 @@ def validate_remote_url(url: str, *, allow_http_loopback: bool = True) -> None:
         raise SourceAdapterError("Source URL is invalid.") from exc
     if parsed.scheme not in {"https", "http"} or not host or parsed.username or parsed.password:
         raise SourceAdapterError("Source URL must be a credential-free HTTP(S) address.")
-    loopback = _is_loopback_host(host)
-    if parsed.scheme != "https" and not (allow_http_loopback and loopback):
+    if parsed.scheme != "https":
         raise SourceAdapterError("Source URL must use HTTPS.")
-    if loopback:
-        if not allow_http_loopback:
-            raise SourceAdapterError("Loopback addresses are not allowed for this source.")
-        return
+    if _is_loopback_host(host):
+        raise SourceAdapterError("Loopback addresses are not allowed for remote sources.")
     try:
-        resolved = socket.getaddrinfo(host, port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)
+        resolved = socket.getaddrinfo(host, port or 443, type=socket.SOCK_STREAM)
     except OSError as exc:
         raise SourceAdapterError("Source hostname could not be verified.") from exc
-    addresses = {entry[4][0] for entry in resolved}
+    addresses = tuple(dict.fromkeys(entry[4][0] for entry in resolved))
     if not addresses:
         raise SourceAdapterError("Source hostname did not resolve.")
     for address in addresses:
@@ -118,6 +115,26 @@ def validate_remote_url(url: str, *, allow_http_loopback: bool = True) -> None:
             raise SourceAdapterError("Source resolved to an invalid network address.") from exc
         if not parsed_ip.is_global:
             raise SourceAdapterError("Private or reserved network destinations are not allowed.")
+    return host, port or 443, addresses
+
+
+def validate_remote_url(url: str) -> None:
+    """Reject non-web, credential-bearing, private, and unresolved targets."""
+    _resolve_public_addresses(url)
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS connection pinned to a previously validated public IP address."""
+
+    def __init__(self, host: str, pinned_ip: str, *args: Any, **kwargs: Any) -> None:
+        super().__init__(host, *args, **kwargs)
+        self._pinned_ip = pinned_ip
+
+    def connect(self) -> None:
+        raw_socket = socket.create_connection(
+            (self._pinned_ip, self.port), timeout=self.timeout, source_address=self.source_address
+        )
+        self.sock = self._context.wrap_socket(raw_socket, server_hostname=self.host)
 
 
 class _SafeRedirects(HTTPRedirectHandler):
@@ -141,21 +158,43 @@ class _SafeRedirects(HTTPRedirectHandler):
 
 
 def _read_response(request: Request, *, timeout_seconds: float, max_bytes: int, check_robots: bool = False, allowed_redirect_origin: str | None = None) -> bytes:
-    opener = build_opener(_SafeRedirects(check_robots=check_robots, allowed_origin=allowed_redirect_origin, timeout_seconds=timeout_seconds, max_bytes=max_bytes))
-    try:
-        with opener.open(request, timeout=timeout_seconds) as response:
-            status = getattr(response, "status", 200)
-            if status < 200 or status >= 300:
-                raise SourceAdapterError(f"Source returned HTTP {status}.")
+    redirect_policy = _SafeRedirects(check_robots=check_robots, allowed_origin=allowed_redirect_origin, timeout_seconds=timeout_seconds, max_bytes=max_bytes)
+    current = request
+    for redirect_count in range(11):
+        host, port, addresses = _resolve_public_addresses(current.full_url)
+        connection = _PinnedHTTPSConnection(host, addresses[0], port=port, timeout=timeout_seconds, context=ssl.create_default_context())
+        parsed = urlsplit(current.full_url)
+        target = parsed.path or "/"
+        if parsed.query:
+            target += "?" + parsed.query
+        headers = dict(current.header_items())
+        headers.setdefault("Host", parsed.netloc)
+        try:
+            connection.request(current.get_method(), target, body=current.data, headers=headers)
+            response = connection.getresponse()
+            if response.status in {301, 302, 303, 307, 308}:
+                location = response.getheader("Location")
+                response.read(max_bytes + 1)
+                if not location or redirect_count == 10:
+                    raise SourceAdapterError("Source returned too many or an invalid redirects.")
+                next_url = urljoin(current.full_url, location)
+                next_request = redirect_policy.redirect_request(current, response, response.status, response.reason, response.headers, next_url)
+                if next_request is None:
+                    raise SourceAdapterError("Source redirect was rejected.")
+                current = next_request
+                continue
+            if response.status < 200 or response.status >= 300:
+                raise SourceAdapterError(f"Source returned HTTP {response.status}.")
             data = response.read(max_bytes + 1)
-    except SourceAdapterError:
-        raise
-    except HTTPError as exc:
-        raise SourceAdapterError(f"Source returned HTTP {exc.code}.") from exc
-    except (TimeoutError, URLError, OSError) as exc:
-        if isinstance(exc, URLError) and isinstance(exc.reason, TimeoutError):
-            raise SourceAdapterError("Source request timed out.") from exc
-        raise SourceAdapterError("Source request failed or timed out.") from exc
+        except SourceAdapterError:
+            raise
+        except (TimeoutError, OSError, http.client.HTTPException, ssl.SSLError) as exc:
+            if isinstance(exc, (TimeoutError, socket.timeout)):
+                raise SourceAdapterError("Source request timed out.") from exc
+            raise SourceAdapterError("Source request failed or timed out.") from exc
+        finally:
+            connection.close()
+        break
     if len(data) > max_bytes:
         raise SourceAdapterError("Source response exceeded the configured size limit.")
     return data
@@ -519,7 +558,7 @@ class ScraplingAdapter:
         if "scrapling public page" not in _capability(source):
             raise SourceAdapterError("Source is not configured for the Scrapling public-page adapter.")
         url = _source_value(source, "url")
-        validate_remote_url(url, allow_http_loopback=False)
+        validate_remote_url(url)
         try:
             payload = self.fetcher(url, timeout_seconds, max_bytes) if self.fetcher else _fetch_url(url, timeout_seconds, max_bytes, check_robots=True)
         except SourceAdapterError:

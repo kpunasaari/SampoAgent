@@ -131,10 +131,17 @@
 - [x] Test dashboard uses clean onboarding state until a user profile exists and displays source readiness/discovery action after onboarding.
 - [x] Test the Jobs UI does not require title/company/location/description entry to run discovery and still retains optional manual import.
 - [x] Simplify navigation by keeping the eight primary destinations visible and grouping secondary tools without removing them; retain active-path state, responsive shell, labels, and keyboard focus.
-- [ ] Browser-check desktop and narrow widths for onboarding, dashboard, profile, careers, jobs/discovery, sources CRUD, settings, email connection status, queue, and applications.
+- [x] Browser-check desktop and narrow widths for onboarding, dashboard, profile, careers, jobs/discovery, sources CRUD, settings, email connection status, queue, and applications; checked at 1440px and 390px with no horizontal page overflow.
 - [x] Run full `py -m pytest -q` (153 passed), `py -m compileall -q sampoagent`, CLI help, local route smoke tests, and secret scan.
 - [x] Update docs to distinguish implemented and credential-dependent features; state that API activation and OAuth app registration are external prerequisites.
 - [x] Review diff, commit coherent changes, push branch `dark-modern-ui`, update existing pull request #1, and attach its URL.
+
+### Final security review follow-up (2026-09-23)
+
+- [x] Reject loopback feed destinations and prevent DNS rebinding by pinning each HTTPS connection to a validated public IP while retaining hostname-based TLS verification.
+- [x] Revalidate and pin each redirect destination; keep authenticated API redirects restricted to the exact official origin.
+- [x] Verify adapter regressions and the full suite: 162 passed; compileall and CLI help passed.
+- [x] Independent code review cleared the SSRF finding; desktop/narrow UI checks completed on clean temporary database.
 
 ## Completion evidence
 

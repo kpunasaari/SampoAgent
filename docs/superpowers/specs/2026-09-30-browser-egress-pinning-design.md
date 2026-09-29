@@ -10,7 +10,7 @@ The Playwright form adapter currently preflights DNS answers in Python and then 
 
 Run a small ephemeral HTTP CONNECT proxy on loopback for the lifetime of the Playwright context. Playwright's persistent context uses that proxy for network traffic. The proxy accepts CONNECT only. In application mode it permits only the exact host and port of the current HTTPS origin; in the separate manually controlled browser session it permits only HTTPS port 443 and public destinations. It resolves the host once, rejects the whole DNS result set if any address is non-global, and connects to a validated numeric IP literal. It tunnels the browser's original TLS stream without interception. No third-party dependency is needed.
 
-The request route remains a second application-layer check for URL scheme, credentials, sensitive URL parameters, and the exact employer origin, but no longer treats its DNS preflight as the final network boundary. The proxy's pinned connection is the final DNS decision. Proxy shutdown is tied to browser shutdown and startup failures fail closed.
+The request route remains a second application-layer check for URL scheme, credentials, sensitive URL parameters, and the exact employer origin, but no longer treats its DNS preflight as the final network boundary. The proxy's pinned connection is the final DNS decision. Proxy shutdown is tied to browser shutdown and startup failures fail closed. An unexpected browser-context close stops the proxy; explicit proxy shutdown closes established client and upstream sockets and invalidates pending DNS results before a later restart can use them.
 
 ## Alternatives considered
 
@@ -22,12 +22,12 @@ The loopback CONNECT proxy is the best portable application-layer step. It does 
 
 ## Safety and failure behavior
 
-- Only a syntactically valid CONNECT is considered.
+- Only a syntactically valid CONNECT authority in strict `host:port` form is considered; userinfo and path/query/fragment delimiters are rejected before DNS even when the delimited component is empty.
 - The job-application context can tunnel only to the exact origin opened by SampoAgent; other hostnames/ports are rejected even if DNS is public. A non-default HTTPS port is allowed only when it is part of that exact inspected origin.
 - The manually controlled browser context can tunnel only to HTTPS port 443.
 - Every resolved A/AAAA address must be globally routable. Mixed public/private answers fail closed.
 - The TCP connector receives a numeric validated address, not the requested hostname; TLS SNI and certificate validation remain browser-owned inside the tunnel.
-- Resolution errors, proxy bind/start errors, invalid authorities, and upstream connection errors fail closed without direct application fallback being intentionally configured.
+- Resolution errors, proxy bind/start errors, invalid authorities, and upstream connection errors fail closed without direct application fallback being intentionally configured. Closing the proxy terminates every active tunnel; a resolver result from a prior proxy generation cannot start a later connection.
 - Proxy diagnostics must not log URL paths, query strings, candidate data, or employer form content.
 - Existing CAPTCHA, login/MFA, high-risk question, consent, form-signature, and final-click controls remain unchanged.
 

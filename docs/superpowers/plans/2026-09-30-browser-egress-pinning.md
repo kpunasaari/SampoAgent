@@ -25,9 +25,9 @@
 
 - A malicious/mixed DNS response must not result in any upstream connection.
 - The connector must receive a numeric validated IP, never the hostname.
-- Unexpected destination host/port, malformed CONNECT, HTTP GET, and DNS/connect failures must fail closed.
+- Unexpected destination host/port, malformed CONNECT authorities (including empty userinfo/query/fragment delimiters), HTTP GET, and DNS/connect failures must fail closed.
 - Playwright must not be launched without the local proxy after the adapter's URL policy is enabled.
-- Proxy lifetime must end on context close and on partial startup failure.
+- Proxy lifetime must end on context close and on partial startup failure; explicit proxy close must terminate active tunnels and invalidate delayed DNS results before proxy restart.
 - Existing browser submission guards and synthetic ATS tests must remain unchanged in behavior.
 
 ---
@@ -53,6 +53,14 @@
 - [x] Verify existing synthetic Chromium form matrix and all live-submit guard tests pass without network access: full suite → 453 passed, one upstream Starlette/httpx deprecation warning.
 - [x] Update design/AGENTS wording with the implemented boundary and outstanding OS-level/browser failover gates.
 - [x] Commit the completed task as `feat: pin browser https egress through local proxy`.
+
+#### Review follow-up (2026-09-30)
+
+- [x] Reproduce malformed CONNECT authorities that `urlsplit()` normalized and assert zero DNS/connector calls.
+- [x] Reproduce post-close bytes traversing an active tunnel and terminate active client/upstream sockets on close.
+- [x] Invalidate delayed resolver work across close/restart; serialize the bounded connector phase with proxy shutdown.
+- [x] Tie unexpected Playwright context close to proxy shutdown.
+- [x] Run the full verification suite again and record final review disposition: the read-only review found two Important findings, both were reproduced and fixed; no Critical findings were reported. Final full suite: 459 passed, 1 upstream deprecation warning.
 
 **Expected:** proxy tests, Playwright guard tests and application runner safety tests pass; the application browser's request path uses a pinned numeric upstream address; existing application submission behavior is unchanged.
 

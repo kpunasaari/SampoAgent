@@ -8,7 +8,6 @@ import ipaddress
 import select
 import secrets
 import socket
-import socketserver
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable, Any
@@ -130,58 +129,94 @@ class _ConnectHandler(BaseHTTPRequestHandler):
             self._reject(407)
             return
         try:
-            target = urlsplit("//" + self.path)
-            host = target.hostname or ""
-            port = target.port
-            if (
-                not host or not port or target.username or target.password
-                or target.path or target.query or target.fragment
-                or not owner._destination_allowed(host, port)
-                or not is_safe_public_https_url(_host_url(host, port))
-            ):
+            host, port = _parse_connect_authority(self.path)
+            if not owner._destination_allowed(host, port) or not is_safe_public_https_url(_host_url(host, port)):
                 self._reject(403)
                 return
         except (TypeError, ValueError, UnsafeProxyDestination):
             self._reject(400)
             return
 
-        try:
-            upstream = connect_to_validated_ip(
-                host, port, resolver=owner._resolver, connector=owner._connector
-            )
-        except (OSError, UnsafeProxyDestination):
-            self._reject(502)
+        generation = owner._begin_tunnel(self.connection)
+        if generation is None:
+            try:
+                self._reject(503)
+            except OSError:
+                pass
             return
 
+        upstream: socket.socket | None = None
         try:
+            addresses = _global_addresses(host, port, owner._resolver)
+            upstream = owner._connect_if_current(self.connection, port, addresses, generation)
+            if upstream is None:
+                return
             self.send_response(200, "Connection established")
             self.end_headers()
             self.wfile.flush()
             self.close_connection = True
             self._tunnel(upstream)
-        except OSError:
-            pass
-        finally:
+        except (OSError, UnsafeProxyDestination):
             try:
-                upstream.close()
+                self._reject(502)
             except OSError:
                 pass
+        finally:
+            owner._end_tunnel(self.connection, upstream)
+            if upstream is not None:
+                try:
+                    upstream.close()
+                except OSError:
+                    pass
 
     def _tunnel(self, upstream: socket.socket) -> None:
         client = self.connection
-        client.settimeout(None)
-        upstream.settimeout(None)
+        try:
+            client.settimeout(None)
+            upstream.settimeout(None)
+        except OSError:
+            return
         sockets = (client, upstream)
         while True:
-            readable, _, exceptional = select.select(sockets, (), sockets, 120)
+            try:
+                readable, _, exceptional = select.select(sockets, (), sockets, 120)
+            except (OSError, ValueError):
+                return
             if exceptional or not readable:
                 return
             for source in readable:
                 target = upstream if source is client else client
-                data = source.recv(65536)
-                if not data:
+                try:
+                    data = source.recv(65536)
+                    if not data:
+                        return
+                    target.sendall(data)
+                except OSError:
                     return
-                target.sendall(data)
+
+
+def _parse_connect_authority(authority: str) -> tuple[str, int]:
+    """Parse the strict host:port authority form required by CONNECT."""
+    if (
+        not authority
+        or any(character in authority for character in "/?#@\\%")
+        or any(ord(character) <= 32 or ord(character) == 127 for character in authority)
+    ):
+        raise ValueError("Malformed CONNECT authority")
+    target = urlsplit("//" + authority)
+    if (
+        target.netloc != authority or target.username is not None or target.password is not None
+        or target.path or target.query or target.fragment
+    ):
+        raise ValueError("Malformed CONNECT authority")
+    try:
+        host = target.hostname or ""
+        port = target.port
+    except ValueError as exc:
+        raise ValueError("Malformed CONNECT authority") from exc
+    if not host or port is None or not 1 <= port <= 65535:
+        raise ValueError("Malformed CONNECT authority")
+    return host, port
 
 
 class PinnedHttpsProxy:
@@ -197,9 +232,13 @@ class PinnedHttpsProxy:
         self._resolver = resolver
         self._connector = connector
         self._lock = threading.RLock()
+        self._lifecycle_lock = threading.Lock()
         self._origin: tuple[str, int] | None = None
         self._server: _PinnedProxyServer | None = None
         self._thread: threading.Thread | None = None
+        self._generation = 0
+        self._closing = True
+        self._active_tunnels: set[socket.socket] = set()
         self._username = "sampoagent"
         self._password = secrets.token_urlsafe(32)
         if allowed_origin is not None:
@@ -255,10 +294,44 @@ class PinnedHttpsProxy:
         expected = "Basic " + base64.b64encode(f"{self._username}:{self._password}".encode()).decode("ascii")
         return hmac.compare_digest(header, expected)
 
-    def start(self) -> None:
+    def _begin_tunnel(self, client: socket.socket) -> int | None:
         with self._lock:
-            if self._server is not None:
-                return
+            if self._closing or self._server is None:
+                return None
+            self._active_tunnels.add(client)
+            return self._generation
+
+    def _connect_if_current(
+        self, client: socket.socket, port: int, addresses: tuple[str, ...], generation: int
+    ) -> socket.socket | None:
+        failures: list[OSError] = []
+        # Serialize the bounded TCP connect phase with shutdown. DNS remains
+        # outside this lock; a stale resolver result cannot start a new dial.
+        with self._lock:
+            if self._closing or self._generation != generation or client not in self._active_tunnels:
+                return None
+            for address in addresses:
+                try:
+                    upstream = self._connector((address, port), timeout=10)
+                    self._active_tunnels.add(upstream)
+                    return upstream
+                except OSError as exc:
+                    failures.append(exc)
+        if failures:
+            raise OSError("Could not connect to any validated public address") from failures[-1]
+        raise UnsafeProxyDestination("Destination did not provide a usable address")
+
+    def _end_tunnel(self, client: socket.socket, upstream: socket.socket | None) -> None:
+        with self._lock:
+            self._active_tunnels.discard(client)
+            if upstream is not None:
+                self._active_tunnels.discard(upstream)
+
+    def start(self) -> None:
+        with self._lifecycle_lock:
+            with self._lock:
+                if self._server is not None:
+                    return
             server = _PinnedProxyServer(("127.0.0.1", 0), self)
             thread = threading.Thread(target=server.serve_forever, name="sampoagent-pinned-proxy", daemon=True)
             try:
@@ -266,18 +339,34 @@ class PinnedHttpsProxy:
             except Exception:
                 server.server_close()
                 raise
-            self._server = server
-            self._thread = thread
+            with self._lock:
+                self._generation += 1
+                self._closing = False
+                self._server = server
+                self._thread = thread
 
     def close(self) -> None:
-        with self._lock:
-            server = self._server
-            thread = self._thread
-            self._server = None
-            self._thread = None
-        if server is None:
-            return
-        server.shutdown()
-        server.server_close()
-        if thread is not None:
-            thread.join(timeout=5)
+        with self._lifecycle_lock:
+            with self._lock:
+                server = self._server
+                thread = self._thread
+                self._server = None
+                self._thread = None
+                self._closing = True
+                self._generation += 1
+                active_tunnels = tuple(self._active_tunnels)
+                self._active_tunnels.clear()
+            for active_socket in active_tunnels:
+                try:
+                    active_socket.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                try:
+                    active_socket.close()
+                except OSError:
+                    pass
+            if server is not None:
+                server.shutdown()
+                server.server_close()
+                if thread is not None:
+                    thread.join(timeout=5)

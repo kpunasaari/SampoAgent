@@ -379,6 +379,7 @@ def test_browser_start_installs_local_pinned_proxy_before_page_use(tmp_path, mon
             self.pages = [FakePage()]
             self.routes = []
             self.websocket_routes = []
+            self.listeners = {}
             self.closed = False
 
         def route(self, pattern, handler):
@@ -386,6 +387,13 @@ def test_browser_start_installs_local_pinned_proxy_before_page_use(tmp_path, mon
 
         def route_web_socket(self, pattern, handler):
             self.websocket_routes.append((pattern, handler))
+
+        def on(self, event, handler):
+            self.listeners[event] = handler
+
+        def emit_close(self):
+            self.closed = True
+            self.listeners["close"](self)
 
         def close(self):
             self.closed = True
@@ -429,9 +437,14 @@ def test_browser_start_installs_local_pinned_proxy_before_page_use(tmp_path, mon
     assert proxy_config["server"].startswith("http://127.0.0.1:")
     assert proxy_config["username"]
     assert proxy_config["password"]
+    proxy = agent._egress_proxy
+    assert proxy is not None and proxy.started
+    context.emit_close()
+    assert not proxy.started
+    assert agent._egress_proxy is None
+    assert agent._context is None
     agent.close()
     assert context.closed
-    assert agent._egress_proxy is None
 
 
 def test_proxy_is_closed_when_browser_start_fails(tmp_path, monkeypatch):

@@ -48,6 +48,7 @@ class PlaywrightBrowserAgent:
         self._egress_proxy: PinnedHttpsProxy | None = None
         self._playwright: Any = None
         self._context: Any = None
+        self._closing = False
         self._page: Any = None
         self._fields: dict[str, Any] = {}
         self._kinds: dict[str, str] = {}
@@ -59,6 +60,10 @@ class PlaywrightBrowserAgent:
     def start(self) -> None:
         if self._context is not None:
             return
+        if self._playwright is not None:
+            previous_playwright = self._playwright
+            self._playwright = None
+            previous_playwright.stop()
         try:
             from playwright.sync_api import sync_playwright
         except ImportError as exc:
@@ -76,32 +81,49 @@ class PlaywrightBrowserAgent:
             )
             self._context.route("**/*", self._guard_request)
             self._context.route_web_socket("**/*", self._block_websocket)
+            self._context.on("close", self._on_context_closed)
             self._page = self._context.pages[0] if self._context.pages else self._context.new_page()
         except Exception as exc:
             self.close()
             raise BrowserUnavailable("Chromium could not start. Install the Playwright browser runtime and try again.") from exc
 
     def close(self) -> None:
+        self._closing = True
         context = self._context
         self._context = None
         self._page = None
         try:
-            if context is not None:
-                context.close()
-        finally:
-            proxy = self._egress_proxy
-            self._egress_proxy = None
             try:
-                if proxy is not None:
-                    proxy.close()
+                if context is not None:
+                    context.close()
             finally:
-                playwright = self._playwright
-                self._playwright = None
+                proxy = self._egress_proxy
+                self._egress_proxy = None
                 try:
-                    if playwright is not None:
-                        playwright.stop()
+                    if proxy is not None:
+                        proxy.close()
                 finally:
-                    self._allowed_origin = None
+                    playwright = self._playwright
+                    self._playwright = None
+                    try:
+                        if playwright is not None:
+                            playwright.stop()
+                    finally:
+                        self._allowed_origin = None
+        finally:
+            self._closing = False
+
+    def _on_context_closed(self, *_args: object) -> None:
+        """Stop network egress if the user closes Chromium outside this adapter."""
+        if self._closing:
+            return
+        self._context = None
+        self._page = None
+        self._allowed_origin = None
+        proxy = self._egress_proxy
+        self._egress_proxy = None
+        if proxy is not None:
+            proxy.close()
 
     def _require_page(self) -> Any:
         if self._page is None:

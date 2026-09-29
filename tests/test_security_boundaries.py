@@ -42,7 +42,7 @@ def test_candidate_record_form_does_not_echo_untrusted_exception_details(tmp_pat
     assert "C:" not in response.headers["location"]
 
 
-def test_worker_failure_persists_only_a_generic_status(tmp_path, monkeypatch):
+def test_worker_failure_persists_only_a_generic_status(tmp_path, monkeypatch, caplog):
     database_path = tmp_path / "worker-redaction.db"
     repository = Repository(database_path)
     repository.initialize()
@@ -58,20 +58,22 @@ def test_worker_failure_persists_only_a_generic_status(tmp_path, monkeypatch):
     monkeypatch.setattr("sampoagent.applications.worker.enqueue_eligible_applications", fail_queue)
 
     try:
-        try:
-            run_worker_cycle(
-                repository,
-                FailingBrowser(),
-                discover=False,
-                owner="synthetic-worker",
-            )
-        except Exception:
-            pass
+        with caplog.at_level(logging.DEBUG):
+            try:
+                run_worker_cycle(
+                    repository,
+                    FailingBrowser(),
+                    discover=False,
+                    owner="synthetic-worker",
+                )
+            except Exception:
+                pass
 
         state = repository.worker_status()
         assert state["status"] == "failed"
         assert state["last_result"] == "Worker cycle failed. No error details were stored."
         assert PRIVATE_ERROR not in str(state)
+        assert PRIVATE_ERROR not in caplog.text
     finally:
         repository.release_worker_lease("synthetic-worker")
         repository.connection.close()

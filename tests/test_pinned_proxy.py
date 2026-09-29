@@ -1,4 +1,5 @@
 import base64
+import logging
 import socket
 import threading
 
@@ -256,6 +257,26 @@ def test_proxy_fails_closed_when_resolution_or_connect_fails(failure):
     try:
         response = _connect_request(proxy, "jobs.example.fi:443")
         assert " 502 " in response.splitlines()[0]
+    finally:
+        proxy.close()
+
+
+def test_proxy_does_not_log_dns_error_details(caplog, capsys):
+    private_error = "candidate@example.test access_token=synthetic-secret C:\\Users\\candidate\\cv.pdf"
+
+    def resolver(host, port, *, type):
+        raise OSError(private_error)
+
+    proxy = PinnedHttpsProxy("https://jobs.example.fi/apply", resolver=resolver)
+    proxy.start()
+    try:
+        with caplog.at_level(logging.DEBUG):
+            response = _connect_request(proxy, "jobs.example.fi:443")
+        assert response.startswith("HTTP/1.1 502 ")
+        output = capsys.readouterr()
+        assert private_error not in caplog.text
+        assert private_error not in output.out
+        assert private_error not in output.err
     finally:
         proxy.close()
 

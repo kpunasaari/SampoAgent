@@ -19,13 +19,13 @@ separate job-specific confirmation rule.
 
 ## Credentials and logs
 
-Provider API keys are configured outside SQLite. Gmail and Outlook are currently
-read-only; token payloads are encrypted in SQLite with
-`SAMPOAGENT_TOKEN_ENCRYPTION_KEY`. Keep that key outside backups, source control,
-and shared folders. A restored mailbox connection is usable only with the same
-key. No email-send grant is implemented in this version. Browser passwords are
-entered manually by the candidate and stay in the local Playwright browser
-profile; they are not placed in the application database or export.
+Provider API keys are configured outside SQLite. Gmail/Outlook inbox-read and
+application-send scopes are separate; send authorization is granted explicitly
+and send tokens are encrypted in SQLite with `SAMPOAGENT_TOKEN_ENCRYPTION_KEY`.
+Keep that key outside backups, source control, and shared folders. A restored
+mail connection is usable only with the same key. Browser passwords are entered
+manually by the candidate and stay in the local Playwright browser profile; they
+are not placed in the application database or export.
 
 Local-server access logging is disabled because OAuth callbacks contain
 short-lived authorization codes and state values in their query strings.
@@ -37,6 +37,14 @@ User-facing form failures, failed source-result summaries, worker status, and
 automation CLI failures use fixed messages rather than interpolated exception
 text; CLI exception chaining is suppressed at those boundaries. A synthetic
 PII/secret fixture verifies these boundaries in `tests/test_security_boundaries.py`.
+
+The activity/audit trail stores only a fixed allowlisted action code and a
+generic privacy detail; callers cannot persist free-form values through
+`Repository.log()`. Repository reads and the dashboard replace details on old
+rows as well, so legacy event text is not rendered there. This does not rewrite
+or delete pre-hardening values: existing SQLite files and encrypted backups may
+still contain them. No production candidate database was opened or scrubbed in
+this code change. Older data needs an explicit, user-controlled cleanup decision.
 
 This does not mean that the local database is de-identified: candidate facts,
 confirmed answers, employer-response evidence, CVs, and email snippets are

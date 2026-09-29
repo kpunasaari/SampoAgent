@@ -21,6 +21,27 @@ from sampoagent.candidate.questions import (
 from sampoagent.careers.taxonomy import TaxonomyOccupation, TaxonomyOccupationSkill
 
 
+_SAFE_ACTIVITY_ACTIONS = frozenset({
+    "application_email_draft_cancelled", "application_email_draft_created", "application_email_interrupted",
+    "application_email_send_finished", "application_email_send_reserved", "application_package_approved",
+    "application_package_waiting_review", "application_preparation_claimed", "application_preparation_released",
+    "application_preparations_recovered", "application_resumed", "application_status_changed",
+    "application_submit_cancelled_preclick", "application_submit_reserved", "autopilot_granted",
+    "autopilot_revoked", "candidate_record_added", "candidate_record_deleted", "candidate_record_updated",
+    "captcha_task_completed", "captcha_task_created", "captcha_task_started", "career_profile_added",
+    "career_profile_deleted", "career_profile_enabled", "career_profile_updated", "confirmed_fact_added",
+    "cv_record_needs_review", "cv_record_reviewed", "cv_template_registered", "demo_loaded",
+    "email_send_autopilot_granted", "esco_taxonomy_imported", "fact_confirmed", "fact_deleted",
+    "fact_edited", "fact_rejected", "job_imported", "job_language_override", "job_override", "job_verified",
+    "mail_send_account_disconnected", "mail_send_connected", "mail_send_disconnected", "mailbox_connected",
+    "mailbox_disconnected", "onboarding_answers_confirmed", "queue_created", "semantic_cache_cleared",
+    "setting_changed", "skill_added", "source_added", "source_deleted", "source_enabled", "source_updated",
+    "target_occupation_approved", "target_occupation_deleted", "target_occupation_enabled",
+    "target_occupations_replaced",
+})
+_SAFE_ACTIVITY_DETAIL = "Activity details omitted to protect privacy."
+
+
 def _split_candidate_values(value: str) -> list[str]:
     """Split the explicit multi-skill list without guessing at full sentences."""
     parts = re.split(r"[\r\n,;|·•]+", value)
@@ -2623,7 +2644,8 @@ class Repository:
     def rows(self, table: str) -> list[dict[str, object]]:
         if table not in {"facts", "career_profiles", "job_sources", "jobs", "applications", "activity_log"}:
             raise ValueError("Unsupported table")
-        return [dict(row) for row in self.connection.execute(f"SELECT * FROM {table} ORDER BY id DESC")]
+        rows = [dict(row) for row in self.connection.execute(f"SELECT * FROM {table} ORDER BY id DESC")]
+        return [self._safe_activity_row(row) for row in rows] if table == "activity_log" else rows
 
     def job(self, job_id: int) -> dict[str, object] | None:
         row = self.connection.execute(
@@ -2646,7 +2668,23 @@ class Repository:
         return dict(row) if row else None
 
     def log(self, action: str, details: str) -> None:
-        self.connection.execute("INSERT INTO activity_log(action, details, created_at) VALUES (?, ?, ?)", (action, details, datetime.now(timezone.utc).isoformat()))
+        """Record an allowlisted event code without caller-controlled detail text."""
+        safe_action = action if isinstance(action, str) and action in _SAFE_ACTIVITY_ACTIONS else "activity"
+        self.connection.execute(
+            "INSERT INTO activity_log(action, details, created_at) VALUES (?, ?, ?)",
+            (safe_action, _SAFE_ACTIVITY_DETAIL, datetime.now(timezone.utc).isoformat()),
+        )
+
+    @staticmethod
+    def _safe_activity_row(row: dict[str, object]) -> dict[str, object]:
+        safe = dict(row)
+        action = safe.get("action")
+        safe["action"] = action if isinstance(action, str) and action in _SAFE_ACTIVITY_ACTIONS else "activity"
+        safe["details"] = _SAFE_ACTIVITY_DETAIL
+        return safe
 
     def recent_activity(self, limit: int = 20) -> list[dict[str, object]]:
-        return [dict(row) for row in self.connection.execute("SELECT action, details, created_at FROM activity_log ORDER BY id DESC LIMIT ?", (limit,))]
+        rows = [dict(row) for row in self.connection.execute(
+            "SELECT action, details, created_at FROM activity_log ORDER BY id DESC LIMIT ?", (limit,)
+        )]
+        return [self._safe_activity_row(row) for row in rows]

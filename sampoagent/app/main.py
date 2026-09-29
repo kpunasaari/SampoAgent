@@ -1110,6 +1110,7 @@ def create_app(
 
     @app.get("/settings", response_class=HTMLResponse)
     def settings(notice: str = Query(default="")) -> HTMLResponse:
+        csrf = str(app.state.local_action_token)
         configs = load_configs(repository.setting("scoring_config"))
         preferences = repository.preferences()
         application_mode = repository.setting("application_mode") or "review_everything"
@@ -1176,7 +1177,40 @@ def create_app(
             "<p>To permanently erase the selected local database and SampoAgent-managed files, stop SampoAgent and run: <code>sampoagent erase-local-data --database &lt;database&gt; --storage-dir &lt;application_data&gt; --confirm \"ERASE ALL LOCAL SAMPOAGENT DATA\"</code>. Unrelated files in the storage directory are left untouched.</p>"
             "</section>"
         )
-        return _page("Settings", f"<section><p>Application mode: {escape(repository.setting('application_mode') or 'review_everything')}</p><p>Daily application limit: {escape(repository.setting('daily_limit') or '0')}</p><p>AI usage mode: {escape(repository.setting('ai_usage_mode') or 'minimal')}</p><p>Preferred locations: {escape(str(preferences.get('locations', 'Any')))}</p><p>Work type: {escape(str(preferences.get('work_type', 'any')))}</p><p>Minimum monthly salary: {escape(str(preferences.get('salary_minimum', 0)))}</p><p>{escape(disabled)}</p>{message}{form}{learning_sharing_form}{data_lifecycle}<h3>Local data control</h3><p>Clears cached semantic interpretations only; it does not delete your profile, jobs, applications, or source documents.</p>{cache_form}</section>")
+        activity_details_count = repository.activity_details_needing_redaction()
+        activity_count_description = "entry contains" if activity_details_count == 1 else "entries contain"
+        activity_cleanup_form = (
+            "<section class='settings-group'><h3>Older activity-log details</h3>"
+            f"<p>{activity_details_count} older activity {activity_count_description} stored detail text. This action permanently replaces only those detail fields with a generic privacy note; event types and timestamps remain. It does not redact application timelines or other candidate records, does not alter downloaded backups, and cannot be undone.</p>"
+            f"<form method='post' action='/settings/privacy/redact-activity'><input type='hidden' name='csrf_token' value='{escape(csrf)}'>"
+            "<label>Type REDACT to permanently replace older detail text <input name='confirmation' autocomplete='off' required></label>"
+            f"<button class='danger'{ ' disabled' if activity_details_count == 0 else ''}>Redact {activity_details_count} older activity details</button></form></section>"
+        )
+        response = _page("Settings", f"<section><p>Application mode: {escape(repository.setting('application_mode') or 'review_everything')}</p><p>Daily application limit: {escape(repository.setting('daily_limit') or '0')}</p><p>AI usage mode: {escape(repository.setting('ai_usage_mode') or 'minimal')}</p><p>Preferred locations: {escape(str(preferences.get('locations', 'Any')))}</p><p>Work type: {escape(str(preferences.get('work_type', 'any')))}</p><p>Minimum monthly salary: {escape(str(preferences.get('salary_minimum', 0)))}</p><p>{escape(disabled)}</p>{message}{form}{learning_sharing_form}{data_lifecycle}{activity_cleanup_form}<h3>Local data control</h3><p>Clears cached semantic interpretations only; it does not delete your profile, jobs, applications, or source documents.</p>{cache_form}</section>")
+        _set_local_form_cookie(response, app)
+        return response
+
+    @app.post("/settings/privacy/redact-activity")
+    def redact_legacy_activity_details(
+        request: Request,
+        confirmation: str = Form(...),
+        csrf_token: str = Form(...),
+    ) -> RedirectResponse:
+        from fastapi import HTTPException
+
+        if not _local_form_token_matches(request, csrf_token, app):
+            raise HTTPException(status_code=403, detail="A valid local confirmation is required")
+        if confirmation != "REDACT":
+            return RedirectResponse(
+                "/settings?notice=" + quote("Type REDACT exactly; no stored activity details were changed."),
+                status_code=303,
+            )
+        redacted_count = repository.redact_activity_details()
+        notice = (
+            f"Redacted detail text from {redacted_count} older activity entries; event types and timestamps were preserved."
+            if redacted_count else "No older activity detail text needed redaction."
+        )
+        return RedirectResponse("/settings?notice=" + quote(notice), status_code=303)
 
     @app.post("/settings/data/backup")
     def download_local_backup(

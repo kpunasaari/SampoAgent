@@ -26,7 +26,7 @@ _SAFE_ACTIVITY_ACTIONS = frozenset({
     "application_email_send_finished", "application_email_send_reserved", "application_package_approved",
     "application_package_waiting_review", "application_preparation_claimed", "application_preparation_released",
     "application_preparations_recovered", "application_resumed", "application_status_changed",
-    "application_submit_cancelled_preclick", "application_submit_reserved", "autopilot_granted",
+    "application_submit_cancelled_preclick", "application_submit_reserved", "activity_details_redacted", "autopilot_granted",
     "autopilot_revoked", "candidate_record_added", "candidate_record_deleted", "candidate_record_updated",
     "captcha_task_completed", "captcha_task_created", "captcha_task_started", "career_profile_added",
     "career_profile_deleted", "career_profile_enabled", "career_profile_updated", "confirmed_fact_added",
@@ -2674,6 +2674,29 @@ class Repository:
             "INSERT INTO activity_log(action, details, created_at) VALUES (?, ?, ?)",
             (safe_action, _SAFE_ACTIVITY_DETAIL, datetime.now(timezone.utc).isoformat()),
         )
+
+    def activity_details_needing_redaction(self) -> int:
+        row = self.connection.execute(
+            "SELECT COUNT(*) FROM activity_log WHERE details != ?", (_SAFE_ACTIVITY_DETAIL,)
+        ).fetchone()
+        return int(row[0])
+
+    def redact_activity_details(self) -> int:
+        """Replace legacy free-form activity details, preserving event codes and timestamps."""
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = self.connection.execute(
+                "UPDATE activity_log SET details=? WHERE details != ?",
+                (_SAFE_ACTIVITY_DETAIL, _SAFE_ACTIVITY_DETAIL),
+            )
+            redacted_count = cursor.rowcount
+            if redacted_count:
+                self.log("activity_details_redacted", str(redacted_count))
+            self.connection.commit()
+            return redacted_count
+        except Exception:
+            self.connection.rollback()
+            raise
 
     @staticmethod
     def _safe_activity_row(row: dict[str, object]) -> dict[str, object]:

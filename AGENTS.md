@@ -104,7 +104,7 @@ For job-search and application tasks in this repository, use `.agents/skills/sam
 - Do not interpolate exception messages, request URLs, submitted values, CV content, OAuth tokens, or local paths into errors, audit/status fields, or logs.
 - The local `sampoagent run` server disables Uvicorn access logs to avoid recording OAuth callback query codes. Unhandled HTTP failures return a generic response and log only a random reference plus exception type; no traceback/message is logged by the app boundary.
 - Source failures, worker status, and automation CLI errors use fixed summaries. Suppress exception chaining at CLI boundaries so Python does not print the original private exception.
-- `activity_log` accepts only fixed event codes and stores a generic privacy detail; repository reads mask any legacy detail values rather than rendering them. Pre-hardening rows remain in existing databases and encrypted backups unless the user explicitly removes them.
+- `activity_log` accepts only fixed event codes and stores a generic privacy detail; repository reads mask any legacy detail values rather than rendering them. Settings offers an exact-phrase, local-token-protected action to replace legacy detail fields while preserving event codes/timestamps. Existing exported backups are user-managed and are not retroactively changed.
 - Synthetic PII/secret regression cases are in `tests/test_security_boundaries.py`. This does not de-identify intentionally stored local candidate/employer evidence; native Playwright/browser diagnostics and all historical evidence values still require supervised review before pilot.
 
 ## Source policy and browser request guard — 2026-09-29

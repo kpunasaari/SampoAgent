@@ -41,10 +41,11 @@ PII/secret fixture verifies these boundaries in `tests/test_security_boundaries.
 The activity/audit trail stores only a fixed allowlisted action code and a
 generic privacy detail; callers cannot persist free-form values through
 `Repository.log()`. Repository reads and the dashboard replace details on old
-rows as well, so legacy event text is not rendered there. This does not rewrite
-or delete pre-hardening values: existing SQLite files and encrypted backups may
-still contain them. No production candidate database was opened or scrubbed in
-this code change. Older data needs an explicit, user-controlled cleanup decision.
+rows as well, so legacy event text is not rendered there. Settings provides an
+explicit cleanup form protected by a local action token and exact `REDACT`
+confirmation; it replaces only legacy detail text while preserving event codes
+and timestamps. Previously downloaded backups remain unchanged and user-managed.
+No production candidate database was opened or scrubbed in this code change.
 
 This does not mean that the local database is de-identified: candidate facts,
 confirmed answers, employer-response evidence, CVs, and email snippets are

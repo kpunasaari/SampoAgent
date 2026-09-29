@@ -2,6 +2,7 @@
 
 from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
+from email.utils import parseaddr
 from hashlib import sha256
 from pathlib import Path
 import sqlite3
@@ -89,6 +90,7 @@ class Repository:
             CREATE TABLE IF NOT EXISTS discovery_source_state (source_id INTEGER PRIMARY KEY, consecutive_failures INTEGER NOT NULL DEFAULT 0, last_status TEXT NOT NULL DEFAULT '', last_message TEXT NOT NULL DEFAULT '', last_checked_at TEXT, last_success_at TEXT, next_attempt_at TEXT, FOREIGN KEY(source_id) REFERENCES job_sources(id) ON DELETE CASCADE);
             CREATE TABLE IF NOT EXISTS mailbox_connection (id INTEGER PRIMARY KEY CHECK(id=1), provider TEXT NOT NULL, token_ciphertext TEXT NOT NULL, connected_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS mail_send_connection (id INTEGER PRIMARY KEY CHECK(id=1), provider TEXT NOT NULL, token_ciphertext TEXT NOT NULL, granted_scopes TEXT NOT NULL, connected_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS mail_send_accounts (id INTEGER PRIMARY KEY, provider TEXT NOT NULL CHECK(provider IN ('gmail','microsoft')), provider_subject TEXT NOT NULL, sender_email TEXT NOT NULL, address_status TEXT NOT NULL CHECK(address_status IN ('verified','provider_reported')), token_ciphertext TEXT NOT NULL, granted_scopes TEXT NOT NULL, connected_at TEXT NOT NULL, token_expires_at TEXT NOT NULL DEFAULT '', UNIQUE(provider, provider_subject));
             CREATE TABLE IF NOT EXISTS email_outbox (id INTEGER PRIMARY KEY, application_id INTEGER NOT NULL UNIQUE, provider TEXT NOT NULL CHECK(provider IN ('gmail','microsoft')), idempotency_key TEXT NOT NULL UNIQUE, package_hash TEXT NOT NULL, payload_ciphertext TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('READY','SENDING','ACCEPTED','UNKNOWN','FAILED_FINAL','CANCELLED')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, provider_reference TEXT NOT NULL DEFAULT '', message TEXT NOT NULL DEFAULT '', FOREIGN KEY(application_id) REFERENCES applications(id) ON DELETE CASCADE);
             CREATE TABLE IF NOT EXISTS mailbox_messages (id INTEGER PRIMARY KEY, provider TEXT NOT NULL, provider_message_id TEXT NOT NULL, sender TEXT NOT NULL, subject TEXT NOT NULL, snippet TEXT NOT NULL, received_at TEXT NOT NULL, link TEXT NOT NULL, reviewed INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, UNIQUE(provider, provider_message_id));
             CREATE TABLE IF NOT EXISTS captcha_tasks (id INTEGER PRIMARY KEY, application_id INTEGER NOT NULL UNIQUE, detected_url TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'WAITING_USER', note TEXT NOT NULL DEFAULT '', outcome TEXT, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, FOREIGN KEY(application_id) REFERENCES applications(id));
@@ -103,6 +105,9 @@ class Repository:
         application_columns = {row[1] for row in self.connection.execute("PRAGMA table_info(applications)")}
         if "preparation_token" not in application_columns:
             self.connection.execute("ALTER TABLE applications ADD COLUMN preparation_token TEXT")
+        outbox_columns = {row[1] for row in self.connection.execute("PRAGMA table_info(email_outbox)")}
+        if "sender_account_id" not in outbox_columns:
+            self.connection.execute("ALTER TABLE email_outbox ADD COLUMN sender_account_id INTEGER")
         self.connection.execute("INSERT OR IGNORE INTO application_claims(job_id, application_id) SELECT job_id, MIN(id) FROM applications GROUP BY job_id")
         columns = {row[1] for row in self.connection.execute("PRAGMA table_info(job_sources)")}
         if "notes" not in columns:
@@ -167,6 +172,7 @@ class Repository:
             "email_send_autopilot_authorized": "false",
             "email_send_autopilot_fingerprint": "",
             "email_send_autopilot_expires_at": "",
+            "mail_send_default_account_id": "",
             "automation_paused": "false",
             "ocr_provider": "environment",
         }.items():
@@ -998,59 +1004,134 @@ class Repository:
         row = self.connection.execute("SELECT token_ciphertext FROM mailbox_connection WHERE id=1").fetchone()
         return str(row[0]) if row else None
 
-    def mail_send_connection(self) -> dict[str, object] | None:
+    def mail_send_accounts(self) -> list[dict[str, object]]:
+        return [dict(row) for row in self.connection.execute(
+            "SELECT id,provider,sender_email,address_status,granted_scopes,connected_at,token_expires_at "
+            "FROM mail_send_accounts ORDER BY id DESC"
+        )]
+
+    def mail_send_connection(self, account_id: int | None = None) -> dict[str, object] | None:
+        if account_id is None:
+            try:
+                account_id = int(self.setting("mail_send_default_account_id") or "")
+            except (ValueError, TypeError):
+                return None
         row = self.connection.execute(
-            "SELECT id, provider, granted_scopes, connected_at FROM mail_send_connection WHERE id=1"
+            "SELECT id,provider,provider_subject,sender_email,address_status,granted_scopes,connected_at,token_expires_at "
+            "FROM mail_send_accounts WHERE id=?", (account_id,),
         ).fetchone()
         return dict(row) if row else None
 
-    def mail_send_ciphertext(self) -> str | None:
-        row = self.connection.execute("SELECT token_ciphertext FROM mail_send_connection WHERE id=1").fetchone()
+    def mail_send_ciphertext(self, account_id: int | None = None) -> str | None:
+        connection = self.mail_send_connection(account_id)
+        if not connection:
+            return None
+        row = self.connection.execute("SELECT token_ciphertext FROM mail_send_accounts WHERE id=?", (connection["id"],)).fetchone()
         return str(row[0]) if row else None
 
-    def save_mail_send_connection(self, provider: str, token_ciphertext: str, granted_scopes: str) -> None:
+    def legacy_mail_send_connection_needs_reconnect(self) -> bool:
+        return bool(self.connection.execute("SELECT 1 FROM mail_send_connection WHERE id=1").fetchone())
+
+    def save_mail_send_connection(
+        self,
+        provider: str,
+        token_ciphertext: str,
+        granted_scopes: str,
+        *,
+        subject: str,
+        sender_email: str,
+        address_status: str,
+        token_expires_at: str = "",
+    ) -> int:
         if provider not in {"gmail", "microsoft"} or not token_ciphertext.strip():
             raise ValueError("A supported provider and encrypted send token are required")
+        if not subject.strip() or len(subject) > 512 or not sender_email.strip() or len(sender_email) > 320:
+            raise ValueError("A stable provider subject and address are required")
+        parsed_email = parseaddr(sender_email)
+        if (
+            parsed_email[1] != sender_email or sender_email.count("@") != 1
+            or any(char.isspace() or char in "\r\n\x00<>;,\"'" for char in sender_email)
+            or "." not in sender_email.rsplit("@", 1)[-1]
+        ):
+            raise ValueError("A valid provider-reported account address is required")
+        if address_status != ("verified" if provider == "gmail" else "provider_reported"):
+            raise ValueError("The provider identity status does not match the selected provider")
         scopes = set(granted_scopes.split())
-        required_scope = (
-            "https://www.googleapis.com/auth/gmail.send"
-            if provider == "gmail"
-            else "Mail.Send"
-        )
-        if required_scope not in scopes:
-            raise ValueError("The separate email-send permission was not granted")
-        self.connection.execute(
-            "INSERT INTO mail_send_connection(id,provider,token_ciphertext,granted_scopes,connected_at) "
-            "VALUES (1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET provider=excluded.provider, "
-            "token_ciphertext=excluded.token_ciphertext, granted_scopes=excluded.granted_scopes, connected_at=excluded.connected_at",
-            (provider, token_ciphertext, " ".join(sorted(scopes)), datetime.now(timezone.utc).isoformat()),
-        )
-        self.log("mail_send_connected", provider)
-        self.connection.commit()
-
-    def refresh_mail_send_connection(self, token_ciphertext: str) -> None:
-        """Replace an encrypted access token without renewing consent or its grant binding."""
-        if not token_ciphertext.strip():
-            raise ValueError("An encrypted send token is required")
-        with self.connection:
-            cursor = self.connection.execute(
-                "UPDATE mail_send_connection SET token_ciphertext=? WHERE id=1",
-                (token_ciphertext,),
+        required_scope = "https://www.googleapis.com/auth/gmail.send" if provider == "gmail" else "Mail.Send"
+        if required_scope not in scopes or not {"openid", "email"}.issubset(scopes):
+            raise ValueError("The separate send permission and OIDC identity scopes are required")
+        now = datetime.now(timezone.utc).isoformat()
+        existing = self.connection.execute(
+            "SELECT id FROM mail_send_accounts WHERE provider=? AND provider_subject=?", (provider, subject.strip())
+        ).fetchone()
+        if existing:
+            account_id = int(existing["id"])
+            self.connection.execute(
+                "UPDATE mail_send_accounts SET sender_email=?,address_status=?,token_ciphertext=?,granted_scopes=?,connected_at=?,token_expires_at=? WHERE id=?",
+                (sender_email.strip(), address_status, token_ciphertext, " ".join(sorted(scopes)), now, token_expires_at, account_id),
             )
-            if cursor.rowcount != 1:
-                raise ValueError("Separate email-send permission is not connected")
+        else:
+            cursor = self.connection.execute(
+                "INSERT INTO mail_send_accounts(provider,provider_subject,sender_email,address_status,token_ciphertext,granted_scopes,connected_at,token_expires_at) VALUES (?,?,?,?,?,?,?,?)",
+                (provider, subject.strip(), sender_email.strip(), address_status, token_ciphertext, " ".join(sorted(scopes)), now, token_expires_at),
+            )
+            account_id = int(cursor.lastrowid)
+        if not self.setting("mail_send_default_account_id"):
+            self.connection.execute("UPDATE settings SET value=? WHERE key='mail_send_default_account_id'", (str(account_id),))
+        else:
+            try:
+                selected_id = int(self.setting("mail_send_default_account_id") or "")
+            except (TypeError, ValueError):
+                selected_id = -1
+            if selected_id == account_id:
+                self._revoke_email_send_autopilot()
+        self.log("mail_send_connected", f"{provider}:{account_id}")
+        self.connection.commit()
+        return account_id
+
+    def set_default_mail_send_account(self, account_id: int) -> None:
+        if not self.connection.execute("SELECT 1 FROM mail_send_accounts WHERE id=?", (account_id,)).fetchone():
+            raise ValueError("Choose a connected send account")
+        with self.connection:
+            self.connection.execute("UPDATE settings SET value=? WHERE key='mail_send_default_account_id'", (str(account_id),))
+            self._revoke_email_send_autopilot()
+
+    def remove_mail_send_account(self, account_id: int) -> bool:
+        connection = self.mail_send_connection(account_id)
+        if not connection:
+            return False
+        with self.connection:
+            self.connection.execute("DELETE FROM mail_send_accounts WHERE id=?", (account_id,))
+            if str(self.setting("mail_send_default_account_id") or "") == str(account_id):
+                self.connection.execute("UPDATE settings SET value='' WHERE key='mail_send_default_account_id'")
+                self._revoke_email_send_autopilot()
+            self.log("mail_send_account_disconnected", f"{connection['provider']}:{account_id}")
+        return True
+
+    def refresh_mail_send_connection(self, token_ciphertext: str, account_id: int | None = None, token_expires_at: str = "") -> None:
+        """Replace an encrypted access token without changing account identity or consent."""
+        connection = self.mail_send_connection(account_id)
+        if not token_ciphertext.strip() or not connection:
+            raise ValueError("An encrypted token and connected send account are required")
+        with self.connection:
+            self.connection.execute(
+                "UPDATE mail_send_accounts SET token_ciphertext=?,token_expires_at=CASE WHEN ?='' THEN token_expires_at ELSE ? END WHERE id=?",
+                (token_ciphertext, token_expires_at, token_expires_at, connection["id"]),
+            )
 
     def create_email_outbox(
         self,
         *,
         application_id: int,
         provider: str,
+        sender_account_id: int,
         package_hash: str,
         idempotency_key: str,
         payload_ciphertext: str,
     ) -> dict[str, object]:
-        if provider not in {"gmail", "microsoft"} or not all((package_hash, idempotency_key, payload_ciphertext)):
-            raise ValueError("A valid provider and encrypted package are required")
+        account = self.mail_send_connection(sender_account_id)
+        if provider not in {"gmail", "microsoft"} or not account or account["provider"] != provider or not all((package_hash, idempotency_key, payload_ciphertext)):
+            raise ValueError("A valid identified sender account and encrypted package are required")
         now = datetime.now(timezone.utc).isoformat()
         self.connection.execute("BEGIN IMMEDIATE")
         try:
@@ -1068,13 +1149,13 @@ class Repository:
                     self.connection.rollback()
                     raise ValueError("An email draft already exists for this application")
                 self.connection.execute(
-                    "UPDATE email_outbox SET provider=?,idempotency_key=?,package_hash=?,payload_ciphertext=?,state='READY',created_at=?,updated_at=?,started_at=NULL,finished_at=NULL,provider_reference='',message='' WHERE id=?",
-                    (provider, idempotency_key, package_hash, payload_ciphertext, now, now, int(existing["id"])),
+                    "UPDATE email_outbox SET provider=?,sender_account_id=?,idempotency_key=?,package_hash=?,payload_ciphertext=?,state='READY',created_at=?,updated_at=?,started_at=NULL,finished_at=NULL,provider_reference='',message='' WHERE id=?",
+                    (provider, sender_account_id, idempotency_key, package_hash, payload_ciphertext, now, now, int(existing["id"])),
                 )
             else:
                 self.connection.execute(
-                    "INSERT INTO email_outbox(application_id,provider,idempotency_key,package_hash,payload_ciphertext,state,created_at,updated_at) VALUES (?,?,?,?,?,'READY',?,?)",
-                    (application_id, provider, idempotency_key, package_hash, payload_ciphertext, now, now),
+                    "INSERT INTO email_outbox(application_id,provider,sender_account_id,idempotency_key,package_hash,payload_ciphertext,state,created_at,updated_at) VALUES (?,?,?,?,?,?,'READY',?,?)",
+                    (application_id, provider, sender_account_id, idempotency_key, package_hash, payload_ciphertext, now, now),
                 )
             self.connection.execute(
                 "UPDATE applications SET queue_state='EMAIL_READY',updated_at=? WHERE id=? AND status='QUEUED' AND queue_state IN ('READY','EMAIL_READY')",
@@ -1093,7 +1174,7 @@ class Repository:
 
     def email_outbox_for_application(self, application_id: int) -> dict[str, object] | None:
         row = self.connection.execute(
-            "SELECT id,application_id,provider,idempotency_key,package_hash,state,created_at,updated_at,started_at,finished_at,provider_reference,message FROM email_outbox WHERE application_id=?",
+            "SELECT id,application_id,provider,sender_account_id,idempotency_key,package_hash,state,created_at,updated_at,started_at,finished_at,provider_reference,message FROM email_outbox WHERE application_id=?",
             (application_id,),
         ).fetchone()
         return dict(row) if row else None
@@ -1106,12 +1187,12 @@ class Repository:
 
     def email_outbox_items(self) -> list[dict[str, object]]:
         return [dict(row) for row in self.connection.execute(
-            "SELECT id,application_id,provider,idempotency_key,package_hash,state,created_at,updated_at,started_at,finished_at,provider_reference,message FROM email_outbox ORDER BY id DESC"
+            "SELECT id,application_id,provider,sender_account_id,idempotency_key,package_hash,state,created_at,updated_at,started_at,finished_at,provider_reference,message FROM email_outbox ORDER BY id DESC"
         )]
 
     def ready_email_outbox_items(self) -> list[dict[str, object]]:
         return [dict(row) for row in self.connection.execute(
-            "SELECT e.id,e.application_id,e.provider,e.package_hash,e.state,e.created_at FROM email_outbox e "
+            "SELECT e.id,e.application_id,e.provider,e.sender_account_id,e.package_hash,e.state,e.created_at FROM email_outbox e "
             "JOIN applications a ON a.id=e.application_id WHERE e.state='READY' AND a.status='QUEUED' "
             "AND a.queue_state='EMAIL_READY' ORDER BY e.created_at,e.id"
         )]
@@ -1253,11 +1334,10 @@ class Repository:
             raise
 
     def remove_mail_send_connection(self) -> None:
+        self.connection.execute("DELETE FROM mail_send_accounts")
         self.connection.execute("DELETE FROM mail_send_connection WHERE id=1")
-        self.connection.execute("DELETE FROM settings WHERE key LIKE 'email_send_grant_%'")
-        self.connection.execute("UPDATE settings SET value='false' WHERE key='email_send_autopilot_authorized'")
-        self.connection.execute("UPDATE settings SET value='' WHERE key='email_send_autopilot_fingerprint'")
-        self.connection.execute("UPDATE settings SET value='' WHERE key='email_send_autopilot_expires_at'")
+        self.connection.execute("UPDATE settings SET value='' WHERE key='mail_send_default_account_id'")
+        self._revoke_email_send_autopilot()
         self.log("mail_send_disconnected", "Separate email-send authorization removed")
         self.connection.commit()
 
@@ -1819,12 +1899,21 @@ class Repository:
         connection = self.mail_send_connection() or {}
         payload = {
             "automation_scope": self.automation_scope_fingerprint(),
+            "account_id": connection.get("id", ""),
             "provider": connection.get("provider", ""),
+            "provider_subject": connection.get("provider_subject", ""),
+            "sender_email": connection.get("sender_email", ""),
+            "address_status": connection.get("address_status", ""),
             "connected_at": connection.get("connected_at", ""),
             "granted_scopes": connection.get("granted_scopes", ""),
         }
         canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return sha256(canonical.encode("utf-8")).hexdigest()
+
+    def _revoke_email_send_autopilot(self) -> None:
+        self.connection.execute("UPDATE settings SET value='false' WHERE key='email_send_autopilot_authorized'")
+        self.connection.execute("UPDATE settings SET value='' WHERE key='email_send_autopilot_fingerprint'")
+        self.connection.execute("UPDATE settings SET value='' WHERE key='email_send_autopilot_expires_at'")
 
     def grant_email_send_autopilot(self, *, days: int = 30) -> None:
         connection = self.mail_send_connection()
@@ -1837,8 +1926,9 @@ class Repository:
             or not 1 <= days <= 30
         ):
             raise ValueError("Email Autopilot needs an active Full Autopilot grant and a separate send-only account")
+        granted_scopes = set(str(connection.get("granted_scopes", "")).split())
         required_scope = "https://www.googleapis.com/auth/gmail.send" if connection["provider"] == "gmail" else "Mail.Send"
-        if required_scope not in str(connection.get("granted_scopes", "")).split():
+        if required_scope not in granted_scopes or not {"openid", "email"}.issubset(granted_scopes):
             raise ValueError("The connected email account has not granted send-only permission")
         now = datetime.now(timezone.utc)
         try:

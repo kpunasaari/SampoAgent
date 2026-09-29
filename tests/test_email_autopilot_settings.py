@@ -46,11 +46,12 @@ def test_email_autopilot_is_an_additional_scoped_consent(tmp_path, monkeypatch):
     repository.save_mail_send_connection(
         "gmail",
         encrypt_token_payload({"access_token": "synthetic-token", "refresh_token": "synthetic-refresh", "expires_at": 4_000_000_000}),
-        "https://www.googleapis.com/auth/gmail.send",
+        "openid email https://www.googleapis.com/auth/gmail.send",
+        subject="google-test-subject", sender_email="sender@gmail.test", address_status="verified",
     )
 
     page = client.get("/settings")
-    assert "without another per-email click" in page.text
+    assert "without per-job prompts" in page.text
     assert "I separately authorize automatic sending" in page.text
     response = client.post("/settings", data=_autopilot_payload(), follow_redirects=False)
 
@@ -68,7 +69,8 @@ def test_settings_unchecking_separate_mail_consent_revokes_it(tmp_path, monkeypa
     repository.save_mail_send_connection(
         "gmail",
         encrypt_token_payload({"access_token": "synthetic-token", "refresh_token": "synthetic-refresh", "expires_at": 4_000_000_000}),
-        "https://www.googleapis.com/auth/gmail.send",
+        "openid email https://www.googleapis.com/auth/gmail.send",
+        subject="google-test-subject", sender_email="sender@gmail.test", address_status="verified",
     )
     client.post("/settings", data=_autopilot_payload())
     assert repository.email_send_autopilot_authorized()

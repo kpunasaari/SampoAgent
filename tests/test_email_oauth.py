@@ -10,6 +10,7 @@ from sampoagent.integrations.email_oauth import (
     create_pkce_pair,
     decrypt_token_payload,
     encrypt_token_payload,
+    fetch_send_account_identity,
 )
 
 
@@ -30,8 +31,8 @@ def test_oauth_authorization_uses_read_only_scopes_and_pkce(provider, scope):
 
 
 @pytest.mark.parametrize("provider,scope", [
-    ("gmail", "https://www.googleapis.com/auth/gmail.send"),
-    ("microsoft", "offline_access Mail.Send"),
+    ("gmail", "openid email https://www.googleapis.com/auth/gmail.send"),
+    ("microsoft", "openid email offline_access Mail.Send"),
 ])
 def test_outgoing_email_uses_separate_send_scope_without_read_permission(provider, scope):
     config = OAuthConfig(provider, "client-id", "client-secret", f"http://127.0.0.1:8765/email/callback/{provider}")
@@ -41,6 +42,94 @@ def test_outgoing_email_uses_separate_send_scope_without_read_permission(provide
     assert params["scope"] == [scope]
     assert "Mail.Read" not in params["scope"][0]
     assert "gmail.readonly" not in params["scope"][0]
+    assert "User.Read" not in params["scope"][0]
+
+
+@pytest.mark.parametrize("provider,claims", [
+    ("gmail", {"sub": "google-subject", "email": "sender@gmail.test", "email_verified": True}),
+    ("microsoft", {"sub": "microsoft-subject", "email": "sender@outlook.test"}),
+])
+def test_send_account_identity_uses_fixed_provider_userinfo(provider, claims, monkeypatch):
+    import sampoagent.integrations.email_oauth as oauth
+
+    requests = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit):
+            import json
+            return json.dumps(claims).encode()
+
+    monkeypatch.setattr(oauth, "_open_provider_request", lambda request, timeout: (requests.append(request) or Response()))
+    identity = fetch_send_account_identity(provider, "synthetic-access-token")
+
+    assert identity["subject"] == claims["sub"]
+    assert identity["sender_email"] == claims["email"]
+    assert identity["address_status"] == ("verified" if provider == "gmail" else "provider_reported")
+    assert requests[0].full_url == (
+        "https://openidconnect.googleapis.com/v1/userinfo"
+        if provider == "gmail" else "https://graph.microsoft.com/oidc/userinfo"
+    )
+    assert requests[0].get_header("Authorization") == "Bearer synthetic-access-token"
+
+
+@pytest.mark.parametrize("provider,claims", [
+    ("gmail", {"sub": "google-subject", "email": "sender@gmail.test", "email_verified": False}),
+    ("gmail", {"sub": "google-subject", "email": "bad address", "email_verified": True}),
+    ("microsoft", {"email": "sender@outlook.test"}),
+    ("microsoft", {"sub": "microsoft-subject", "email": "not-an-email"}),
+])
+def test_invalid_send_account_identity_fails_closed(provider, claims, monkeypatch):
+    import json
+    import sampoagent.integrations.email_oauth as oauth
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit):
+            return json.dumps(claims).encode()
+
+    monkeypatch.setattr(oauth, "_open_provider_request", lambda *_args: Response())
+    with pytest.raises(EmailIntegrationError):
+        fetch_send_account_identity(provider, "synthetic-access-token")
+
+
+@pytest.mark.parametrize("provider,expected_scope", [
+    ("gmail", "https://www.googleapis.com/auth/gmail.send"),
+    ("microsoft", "offline_access Mail.Send"),
+])
+def test_send_token_refresh_keeps_only_the_original_send_capability(provider, expected_scope, monkeypatch):
+    import json
+    import sampoagent.integrations.email_oauth as oauth
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit):
+            return json.dumps({"access_token": "refreshed"}).encode()
+
+    captured = []
+    monkeypatch.setattr(oauth, "_open_provider_request", lambda request, _timeout: (captured.append(request) or Response()))
+    config = OAuthConfig(provider, "client", "secret", f"http://127.0.0.1:8765/email/callback/{provider}")
+
+    assert oauth.refresh_access_token(config, refresh_token="refresh", purpose="send")["access_token"] == "refreshed"
+    form = parse_qs(captured[0].data.decode())
+    assert form["scope"] == [expected_scope]
+    assert "openid" not in form["scope"][0]
+    assert "email" not in form["scope"][0]
 
 
 def test_oauth_config_requires_provider_credentials(monkeypatch):

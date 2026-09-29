@@ -9,7 +9,7 @@ from sampoagent.applications.packages import enqueue_eligible_applications
 from sampoagent.applications.runner import process_application
 from sampoagent.jobs.runner import run_discovery
 from sampoagent.integrations.email_send import EmailSendResult, send_email_message
-from sampoagent.integrations.outbox import EmailOutboxError, send_approved_application_email
+from sampoagent.integrations.outbox import EmailOutboxError, prepare_autopilot_email_application, send_approved_application_email
 
 
 @dataclass(frozen=True)
@@ -43,6 +43,14 @@ def run_worker_cycle(repository: object, browser: object, *, discover: bool = Tr
             report = WorkerReport("dry_run", discovery_run_id=discovery_run_id, recovered_unknown=recovered, queued_count=queued_count, recovered_preparing=recovered_preparing)
             return report
         outcomes = []
+        if repository.setting("application_mode") == "autopilot":
+            for application in repository.ready_applications():
+                if repository.setting("automation_paused") == "true" or not repository.renew_worker_lease(lease_owner):
+                    break
+                application_id = int(application["id"])
+                route = prepare_autopilot_email_application(repository, storage_dir, application_id)
+                if route == "HELD":
+                    outcomes.append((application_id, "EMAIL_HELD"))
         if repository.email_send_autopilot_authorized():
             for outbox in repository.ready_email_outbox_items():
                 if repository.setting("automation_paused") == "true" or not repository.renew_worker_lease(lease_owner):

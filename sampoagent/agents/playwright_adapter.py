@@ -13,8 +13,9 @@ from urllib.parse import urljoin
 
 from sampoagent.agents.browser import FormInspection, SubmissionResult
 from sampoagent.agents.forms import FormSchema, parse_file_size_limit
+from sampoagent.agents.pinned_proxy import PinnedHttpsProxy
 from sampoagent.applications.field_resolver import FormField
-from sampoagent.applications.urls import is_safe_public_https_destination, is_safe_public_https_url, is_same_public_origin, looks_like_authentication_page, looks_like_captcha_page
+from sampoagent.applications.urls import is_safe_public_https_url, is_same_public_origin, looks_like_authentication_page, looks_like_captcha_page
 
 
 _SUBMIT_TEXT = re.compile(r"\b(apply|submit|send application|send my application|lähetä hakemus|jätä hakemus|hae paikkaa)\b", re.IGNORECASE)
@@ -44,6 +45,7 @@ class PlaywrightBrowserAgent:
         self.profile_dir = profile_dir
         self._restrict_cross_origin = restrict_cross_origin
         self._allowed_origin: str | None = None
+        self._egress_proxy: PinnedHttpsProxy | None = None
         self._playwright: Any = None
         self._context: Any = None
         self._page: Any = None
@@ -63,9 +65,14 @@ class PlaywrightBrowserAgent:
             raise BrowserUnavailable("Install the optional browser extra, then run `playwright install chromium`.") from exc
         self.profile_dir.mkdir(parents=True, exist_ok=True)
         try:
+            self._egress_proxy = PinnedHttpsProxy(
+                self._allowed_origin if self._restrict_cross_origin else None
+            )
+            self._egress_proxy.start()
             self._playwright = sync_playwright().start()
             self._context = self._playwright.chromium.launch_persistent_context(
-                str(self.profile_dir), headless=False, accept_downloads=False, service_workers="block"
+                str(self.profile_dir), headless=False, accept_downloads=False, service_workers="block",
+                proxy=self._egress_proxy.playwright_proxy,
             )
             self._context.route("**/*", self._guard_request)
             self._context.route_web_socket("**/*", self._block_websocket)
@@ -75,14 +82,26 @@ class PlaywrightBrowserAgent:
             raise BrowserUnavailable("Chromium could not start. Install the Playwright browser runtime and try again.") from exc
 
     def close(self) -> None:
-        if self._context is not None:
-            self._context.close()
+        context = self._context
         self._context = None
         self._page = None
-        if self._playwright is not None:
-            self._playwright.stop()
-        self._playwright = None
-        self._allowed_origin = None
+        try:
+            if context is not None:
+                context.close()
+        finally:
+            proxy = self._egress_proxy
+            self._egress_proxy = None
+            try:
+                if proxy is not None:
+                    proxy.close()
+            finally:
+                playwright = self._playwright
+                self._playwright = None
+                try:
+                    if playwright is not None:
+                        playwright.stop()
+                finally:
+                    self._allowed_origin = None
 
     def _require_page(self) -> Any:
         if self._page is None:
@@ -94,8 +113,8 @@ class PlaywrightBrowserAgent:
 
         Application mode is restricted to the inspected job origin to prevent
         candidate data from being posted to third-party analytics endpoints.
-        Manual login can opt out of same-origin restriction, but still gets the
-        public HTTPS/DNS checks. DNS preflights are not a network sandbox.
+        Manual login can opt out of same-origin restriction, but still gets
+        the public HTTPS check and the proxy's pinned-IP policy.
         """
         request_url = route.request.url
         if request_url.startswith(("data:", "blob:")) or request_url == "about:blank":
@@ -106,7 +125,7 @@ class PlaywrightBrowserAgent:
         ):
             route.abort("blockedbyclient")
             return
-        if is_safe_public_https_destination(request_url):
+        if is_safe_public_https_url(request_url):
             route.continue_()
             return
         route.abort("blockedbyclient")
@@ -117,13 +136,15 @@ class PlaywrightBrowserAgent:
         route.close(code=1008, reason="WebSocket connections are not supported by the safe application adapter")
 
     def open(self, url: str) -> None:
-        if not is_safe_public_https_destination(url):
+        if not is_safe_public_https_url(url):
             raise ValueError("Only public HTTPS application pages without embedded credentials are supported")
         if self._restrict_cross_origin:
             self._allowed_origin = url
         page = self._require_page()
+        if self._egress_proxy is not None:
+            self._egress_proxy.set_allowed_origin(self._allowed_origin if self._restrict_cross_origin else None)
         page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        if not is_safe_public_https_destination(page.url):
+        if not is_safe_public_https_url(page.url):
             raise ValueError("The application page redirected to an unsafe destination")
 
     def _page_text(self) -> str:

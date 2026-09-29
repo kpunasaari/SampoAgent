@@ -31,9 +31,11 @@ existing confirmed data until the user chooses how to resolve them. PDF layout
 heuristics only split clear two-column pages and otherwise fall back to ordinary
 extraction.
 
-Still open: broader official qualification coverage across Finland's regulated
-occupations and additional countries, a guided unified onboarding result/review
-screen, and mapping confirmed preferences into all matching/search consumers.
+The guided unified onboarding result/review screen is implemented at
+`/onboarding/ready`; GET is read-only and a separate action is required to save
+scope or enable Full Autopilot. Still open: broader official qualification
+coverage across Finland's regulated occupations and additional countries, and
+mapping confirmed preferences into all matching/search consumers.
 
 Preserve local-first operation, candidate-fact provenance, and explicit user control. Never fabricate candidate claims or bypass access controls. Keep deterministic work deterministic and consult focused instructions in `.agents/skills/` for agent-assisted workflows.
 
@@ -86,7 +88,7 @@ For job-search and application tasks in this repository, use `.agents/skills/sam
 - The browser adapter runs the centralized pause/authorization/quota/listing gate after re-reading the form and upload hashes and immediately before clicking. Any unverified prefilled optional value on an employer page pauses before overwriting or submitting it.
 - Discovery is sequential, checks at most eight automatic sources per cycle, and now stores exponential source-failure backoff (60 seconds doubling to a six-hour cap); a successful feed/API check clears the backoff. Browser-only sources remain unfetched.
 - Dashboard and queue pages expose persistent worker status/heartbeat/next run, queue age, wait reason and per-source latest result/retry time. The default CLI watch loop remains a single local worker.
-- Remaining limits: configurable parallel per-employer execution is not enabled, cancel cannot abort a currently hung third-party browser navigation instantly, and ATS behavior has only been checked against synthetic local Chromium fixtures. See the staged plan/spec under `docs/superpowers/`.
+- Remaining limits: configurable parallel per-employer execution is not enabled, cancel cannot abort a currently hung third-party browser navigation instantly, and ATS behavior has only been checked against synthetic local Chromium fixtures. Browser requests now use the pinned-IP proxy described below; OS-level egress/fallback verification, employer staging, and pilot gates remain open. See the staged plan/spec under `docs/superpowers/`.
 
 ## App-managed automation worker — 2026-09-29
 
@@ -108,8 +110,8 @@ For job-search and application tasks in this repository, use `.agents/skills/sam
 
 - Scrapling public-page sources require an explicit recorded review of a terms-of-use URL. Changing a previously reviewed source or terms URL invalidates that review; this records the user's decision and is not automated legal interpretation. Robots.txt remains enforced, and browser-only sources are never fetched automatically.
 - Successful automated source checks persist a 60-second minimum interval; failures retain exponential cooldown. Source capability, terms status and retry state are exposed in the local Sources screen.
-- The visible Playwright context blocks service workers and WebSockets. During form handling it blocks cross-origin HTTP(S) requests before DNS resolution, then preflights same-origin destinations for HTTPS and all-answer public IPv4/IPv6 resolution. DNS failures and mixed public/private answers block the request. The manual sign-in CLI can opt out of same-origin restriction, but keeps the public HTTPS/DNS guard.
-- This is defense in depth, not a DNS-rebinding-proof egress sandbox: Chromium resolves the host again after preflight, and browser DNS lookup egress is not fully constrained at the application layer. Do not call browser automation production-ready or expand supported ATS claims until an IP-pinning proxy/OS egress control and user-controlled adapter staging E2E are verified.
+- The visible Playwright context blocks service workers and WebSockets. During form handling it blocks cross-origin HTTP(S) requests before dispatch. All browser HTTPS traffic is configured through an authenticated, ephemeral loopback CONNECT proxy: application mode allows only the exact opened host/port, resolves once, rejects any mixed/private DNS answer set, and dials a validated numeric IP without terminating TLS. The manual sign-in CLI can opt out of same-origin restriction but remains limited to public HTTPS port 443 through the same resolver/pinning policy.
+- This application-layer proxy is not OS-level egress containment. Chromium proxy failure/direct-fallback behavior must still be verified on supported platforms, and OS-level egress policy, user-controlled adapter staging E2E, supervised redaction review, and pilot remain release gates. Do not call browser automation universally production-ready or claim untested ATS support.
 
 ## Codex outcome-learning handoff — 2026-09-30
 
@@ -124,7 +126,7 @@ For job-search and application tasks in this repository, use `.agents/skills/sam
 - The `.sampobak` ZIP envelope uses a scrypt-derived AES-256-GCM key; Settings asks twice and CLI prompts without echo, requires 12+ characters, and never stores the passphrase. It is unrecoverable if lost. Downloaded backups are user-managed and have no automatic retention/deletion policy.
 - Restore verifies archive paths, hashes, and SQLite integrity before staging, requires the app stopped and the exact CLI confirmation, replaces only the selected database/managed document folders, preserves the existing browser-profile, and attempts rollback on filesystem failure.
 - Explicit erase removes the selected database and SQLite sidecars plus SampoAgent-owned data folders including browser-profile; it leaves `.env`, exports, unrelated storage-root files, and stable sibling lock files. CLI server, worker, browser-login, restore and erase share cross-process locks.
-- Verification uses synthetic temporary state only. TestClient validates the Settings export; no real candidate database, browser session, employer site, or application was opened. Full desktop UI smoke, redaction audit, 20+ form matrix, ATS staging E2E, egress sandbox, and end-to-end pilot remain open release gates; no public “universally automatic” claim.
+- Verification uses synthetic temporary state only. TestClient validates the Settings export; no real candidate database, browser session, employer site, or application was opened. Full desktop UI smoke, supervised redaction audit, OS-level egress/fallback enforcement, ATS staging E2E, and end-to-end pilot remain open release gates. The >20 synthetic form-shape matrix exists but does not qualify live ATS adapters; no public “universally automatic” claim.
 
 ## Email Autopilot identity and recipient routing — 2026-09-30
 

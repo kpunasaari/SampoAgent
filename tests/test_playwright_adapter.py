@@ -1,9 +1,10 @@
 import socket
 from dataclasses import replace
 import re
+import pytest
 
 from sampoagent.agents.browser import FormInspection
-from sampoagent.agents.playwright_adapter import PlaywrightBrowserAgent
+from sampoagent.agents.playwright_adapter import BrowserUnavailable, PlaywrightBrowserAgent
 from sampoagent.applications.field_resolver import FormField
 from sampoagent.agents.forms import FormSchema, parse_file_size_limit
 
@@ -319,20 +320,11 @@ def test_synthetic_finnish_swedish_english_ats_form_shape_matrix():
         browser.close()
 
 
-def test_browser_request_guard_blocks_private_dns_and_allows_public_https(monkeypatch):
-    def private_resolve(host, port, *, type):
-        return [(socket.AF_INET6, type, socket.IPPROTO_TCP, "", ("fd00::1", port, 0, 0))]
+def test_browser_request_guard_does_not_resolve_dns_before_proxy(monkeypatch):
+    def should_not_resolve(*_args, **_kwargs):
+        raise AssertionError("The pinned proxy performs the definitive DNS resolution")
 
-    monkeypatch.setattr("sampoagent.applications.urls.socket.getaddrinfo", private_resolve)
-    private_route = _FakeRoute("https://jobs.employer.fi/apply")
-    _request_guarded_agent()._guard_request(private_route)
-    assert private_route.abort_error == "blockedbyclient"
-    assert not private_route.continued
-
-    def public_resolve(host, port, *, type):
-        return [(socket.AF_INET, type, socket.IPPROTO_TCP, "", ("8.8.8.8", port))]
-
-    monkeypatch.setattr("sampoagent.applications.urls.socket.getaddrinfo", public_resolve)
+    monkeypatch.setattr("sampoagent.applications.urls.socket.getaddrinfo", should_not_resolve)
     public_route = _FakeRoute("https://jobs.employer.fi/assets/app.js")
     _request_guarded_agent()._guard_request(public_route)
     assert public_route.continued
@@ -378,7 +370,7 @@ def test_browser_websocket_guard_closes_all_socket_connections():
     assert route.closed == (1008, "WebSocket connections are not supported by the safe application adapter")
 
 
-def test_browser_start_installs_http_and_websocket_guards_before_page_use(tmp_path, monkeypatch):
+def test_browser_start_installs_local_pinned_proxy_before_page_use(tmp_path, monkeypatch):
     class FakePage:
         url = "about:blank"
 
@@ -399,11 +391,16 @@ def test_browser_start_installs_http_and_websocket_guards_before_page_use(tmp_pa
             self.closed = True
 
     context = FakeBrowserContext()
+    agent_reference = {}
 
     class FakeChromium:
+        launch_options = None
+
         def launch_persistent_context(self, profile_dir, **kwargs):
             assert str(profile_dir) == str(tmp_path / "profile")
             assert kwargs["service_workers"] == "block"
+            assert agent_reference["agent"]._egress_proxy.started
+            self.launch_options = kwargs
             return context
 
     class FakePlaywright:
@@ -418,6 +415,7 @@ def test_browser_start_installs_http_and_websocket_guards_before_page_use(tmp_pa
     fake_playwright = FakePlaywright()
     monkeypatch.setattr("playwright.sync_api.sync_playwright", lambda: fake_playwright)
     agent = PlaywrightBrowserAgent(tmp_path / "profile")
+    agent_reference["agent"] = agent
 
     agent.start()
 
@@ -427,8 +425,55 @@ def test_browser_start_installs_http_and_websocket_guards_before_page_use(tmp_pa
     assert len(context.websocket_routes) == 1
     assert context.websocket_routes[0][0] == "**/*"
     assert context.websocket_routes[0][1] == agent._block_websocket
+    proxy_config = fake_playwright.chromium.launch_options["proxy"]
+    assert proxy_config["server"].startswith("http://127.0.0.1:")
+    assert proxy_config["username"]
+    assert proxy_config["password"]
     agent.close()
     assert context.closed
+    assert agent._egress_proxy is None
+
+
+def test_proxy_is_closed_when_browser_start_fails(tmp_path, monkeypatch):
+    class FakeChromium:
+        def launch_persistent_context(self, _profile_dir, **_kwargs):
+            raise RuntimeError("synthetic Chromium start failure")
+
+    class FakePlaywright:
+        chromium = FakeChromium()
+
+        def start(self):
+            return self
+
+        def stop(self):
+            return None
+
+    monkeypatch.setattr("playwright.sync_api.sync_playwright", lambda: FakePlaywright())
+    agent = PlaywrightBrowserAgent(tmp_path / "profile")
+
+    with pytest.raises(BrowserUnavailable):
+        agent.start()
+
+    assert agent._egress_proxy is None
+
+
+def test_proxy_is_closed_even_if_browser_context_close_fails(tmp_path):
+    class BrokenContext:
+        def close(self):
+            raise RuntimeError("synthetic browser shutdown failure")
+
+    agent = PlaywrightBrowserAgent(tmp_path / "profile")
+    from sampoagent.agents.pinned_proxy import PinnedHttpsProxy
+
+    proxy = PinnedHttpsProxy("https://jobs.example.fi/apply")
+    proxy.start()
+    agent._context = BrokenContext()
+    agent._egress_proxy = proxy
+
+    with pytest.raises(RuntimeError, match="synthetic browser shutdown failure"):
+        agent.close()
+
+    assert not proxy.started
 
 
 def test_inspector_extracts_aria_descriptions_radio_groups_file_constraints_and_step_metadata(tmp_path):

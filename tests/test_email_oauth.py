@@ -29,6 +29,20 @@ def test_oauth_authorization_uses_read_only_scopes_and_pkce(provider, scope):
     assert verifier not in challenge
 
 
+@pytest.mark.parametrize("provider,scope", [
+    ("gmail", "https://www.googleapis.com/auth/gmail.send"),
+    ("microsoft", "offline_access Mail.Send"),
+])
+def test_outgoing_email_uses_separate_send_scope_without_read_permission(provider, scope):
+    config = OAuthConfig(provider, "client-id", "client-secret", f"http://127.0.0.1:8765/email/callback/{provider}")
+    _, challenge = create_pkce_pair()
+    params = parse_qs(urlsplit(authorization_url(config, state="send-state", challenge=challenge, purpose="send")).query)
+
+    assert params["scope"] == [scope]
+    assert "Mail.Read" not in params["scope"][0]
+    assert "gmail.readonly" not in params["scope"][0]
+
+
 def test_oauth_config_requires_provider_credentials(monkeypatch):
     monkeypatch.delenv("GOOGLE_CLIENT_ID", raising=False)
     monkeypatch.delenv("GOOGLE_CLIENT_SECRET", raising=False)

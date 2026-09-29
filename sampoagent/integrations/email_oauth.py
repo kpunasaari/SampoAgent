@@ -65,21 +65,37 @@ def create_pkce_pair() -> tuple[str, str]:
     return verifier, challenge
 
 
-def authorization_url(config: OAuthConfig, *, state: str, challenge: str) -> str:
+def required_email_scope(provider: str, purpose: str) -> str:
+    if purpose not in {"read", "send"}:
+        raise EmailIntegrationError("Unsupported email authorization purpose.")
+    if provider == "gmail":
+        return (
+            "https://www.googleapis.com/auth/gmail.send"
+            if purpose == "send"
+            else "https://www.googleapis.com/auth/gmail.readonly"
+        )
+    if provider == "microsoft":
+        return "Mail.Send" if purpose == "send" else "Mail.Read"
+    raise EmailIntegrationError("Unsupported email provider.")
+
+
+def authorization_url(config: OAuthConfig, *, state: str, challenge: str, purpose: str = "read") -> str:
+    required_email_scope(config.provider, purpose)
     if config.provider == "gmail":
         endpoint = "https://accounts.google.com/o/oauth2/v2/auth"
-        scope = "https://www.googleapis.com/auth/gmail.readonly"
+        scope = required_email_scope(config.provider, purpose)
         params = {
             "client_id": config.client_id, "redirect_uri": config.redirect_uri,
             "response_type": "code", "scope": scope, "state": state,
-            "access_type": "offline", "prompt": "consent", "include_granted_scopes": "true",
+            "access_type": "offline", "prompt": "consent",
         }
     else:
         endpoint = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+        provider_scopes = "offline_access User.Read Mail.Read" if purpose == "read" else "offline_access Mail.Send"
         params = {
             "client_id": config.client_id, "redirect_uri": config.redirect_uri,
             "response_type": "code", "response_mode": "query",
-            "scope": "offline_access User.Read Mail.Read", "state": state,
+            "scope": provider_scopes, "state": state,
         }
     params.update({"code_challenge": challenge, "code_challenge_method": "S256"})
     return endpoint + "?" + urlencode(params)
@@ -111,7 +127,7 @@ def exchange_code(config: OAuthConfig, *, code: str, verifier: str, timeout_seco
     return data
 
 
-def refresh_access_token(config: OAuthConfig, *, refresh_token: str, timeout_seconds: float = 10) -> dict[str, object]:
+def refresh_access_token(config: OAuthConfig, *, refresh_token: str, purpose: str = "read", timeout_seconds: float = 10) -> dict[str, object]:
     from urllib.parse import urlencode
 
     payload = urlencode({
@@ -119,7 +135,11 @@ def refresh_access_token(config: OAuthConfig, *, refresh_token: str, timeout_sec
         "client_secret": config.client_secret,
         "refresh_token": refresh_token,
         "grant_type": "refresh_token",
-        **({"scope": "https://www.googleapis.com/auth/gmail.readonly"} if config.provider == "gmail" else {"scope": "offline_access User.Read Mail.Read"}),
+        **({
+            "scope": required_email_scope(config.provider, purpose)
+            if config.provider == "gmail"
+            else ("offline_access User.Read Mail.Read" if purpose == "read" else "offline_access Mail.Send")
+        }),
     }).encode("ascii")
     request = Request(_token_endpoint(config.provider), data=payload, headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"}, method="POST")
     try:

@@ -27,8 +27,10 @@ from sampoagent.data.lifecycle import create_backup_archive, encrypt_backup_arch
 from sampoagent.jobs.matching import matches_preferences
 from sampoagent.jobs.service import normalize_job, verification_state
 from sampoagent.jobs.runner import run_discovery
-from sampoagent.integrations.email_oauth import EmailIntegrationError, OAuthConfig, authorization_url, create_pkce_pair, decrypt_token_payload, encrypt_token_payload, exchange_code, refresh_access_token
+from sampoagent.integrations.email_oauth import EmailIntegrationError, OAuthConfig, authorization_url, create_pkce_pair, decrypt_token_payload, encrypt_token_payload, exchange_code, refresh_access_token, required_email_scope
+from sampoagent.integrations.email_send import send_email_message
 from sampoagent.integrations.mailbox import fetch_recent_messages
+from sampoagent.integrations.outbox import EmailOutboxError, create_application_email_draft, send_approved_application_email
 from sampoagent.jobs.sources import source_health
 from sampoagent.scoring.engine import DimensionConfig
 from sampoagent.scoring.job_score import dump_configs, evaluate_job, load_configs
@@ -75,6 +77,19 @@ def _status(text: str, tone: str) -> str:
     return f'<span class="status status-{escape(tone)}">{escape(text)}</span>'
 
 
+def _local_form_token_matches(request: Request, submitted: str, app: FastAPI) -> bool:
+    expected = str(getattr(app.state, "local_action_token", ""))
+    cookie = request.cookies.get("sampoagent_local_action", "")
+    return bool(expected and cookie and submitted and hmac.compare_digest(expected, submitted) and hmac.compare_digest(expected, cookie))
+
+
+def _set_local_form_cookie(response: Response, app: FastAPI) -> None:
+    response.set_cookie(
+        "sampoagent_local_action", str(app.state.local_action_token),
+        httponly=True, samesite="strict", secure=False, path="/", max_age=86_400,
+    )
+
+
 def _elapsed_label(value: object) -> str:
     try:
         parsed = datetime.fromisoformat(str(value))
@@ -112,6 +127,7 @@ def create_app(
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1", "[::1]", "testserver"])
     app.state.repository = repository
     app.state.email_oauth_states = {}
+    app.state.local_action_token = secrets.token_hex(32)
     if automation_worker is None and manage_automation_worker:
         from sampoagent.applications.worker_controller import AutopilotWorkerController
 
@@ -825,10 +841,13 @@ def create_app(
         return RedirectResponse("/queue?notice=" + quote("Application prepared for review; the tailored CV package is stored."), status_code=303)
 
     @app.get("/applications", response_class=HTMLResponse)
-    def applications(notice: str = Query(default="")) -> HTMLResponse:
+    def applications(request: Request, notice: str = Query(default="")) -> HTMLResponse:
+        repository.recover_interrupted_email_sends()
         application_items = repository.rows("applications")
         row_markup = []
         reviews = []
+        email_cards = []
+        csrf = str(app.state.local_action_token)
         for item in application_items:
             resume_form = f"<form method='post' action='/applications/{item['id']}/resume'><button class='secondary'>Resume after resolving</button></form>" if item["status"] in {"NEEDS_USER", "NEEDS_AUTH", "NOT_SUBMITTED"} else ""
             review = repository.application_review(int(item["id"]))
@@ -866,6 +885,51 @@ def create_app(
                 f"<tr><td>{item['id']}</td><td>{escape(str(item['status']))}</td><td>{escape(str(item['cv_path'] or 'Not selected'))}</td><td>{escape(notes)}{conflict_links}</td>"
                 f"<td><form method='post' action='/applications/{item['id']}/status'><select name='status'><option>APPLIED</option><option>APPLICATION_RECEIVED</option><option>INTERVIEW</option><option>ASSESSMENT</option><option>OFFER</option><option>REJECTED</option><option>WITHDRAWN</option></select><input name='note' placeholder='Optional note'><button>Update</button></form>{resume_form}</td></tr>"
             )
+            job = repository.job(int(item["job_id"]))
+            if not job:
+                continue
+            outbox = repository.email_outbox_for_application(int(item["id"]))
+            if outbox and outbox["state"] == "READY":
+                try:
+                    package = decrypt_token_payload(repository.email_outbox_payload_ciphertext(int(item["id"])) or "")
+                except EmailIntegrationError:
+                    email_cards.append(f"<article class='metric-card'><h3>Email draft for application {item['id']}</h3><p>The encrypted draft cannot be opened. No email was sent; check the local encryption key.</p></article>")
+                    continue
+                send_form = (
+                    f"<form method='post' action='/email/applications/{item['id']}/send'>"
+                    f"<input type='hidden' name='package_hash' value='{escape(str(outbox['package_hash']))}'>"
+                    f"<input type='hidden' name='csrf_token' value='{csrf}'>"
+                    "<label><input type='checkbox' name='send_confirmation' value='yes' required> I reviewed the exact recipient, message and attachment above and authorize this one email to be sent now.</label>"
+                    "<button class='danger'>Send this exact email once</button></form>"
+                    f"<form method='post' action='/email/applications/{item['id']}/cancel'><input type='hidden' name='csrf_token' value='{csrf}'><button class='secondary'>Discard unsent draft</button></form>"
+                )
+                email_cards.append(
+                    f"<article class='metric-card'><h3>Review email application #{item['id']}: {escape(str(package.get('role', '')))} · {escape(str(package.get('employer', '')))}</h3>"
+                    f"<p>To: <strong>{escape(str(package.get('recipient', '')))}</strong></p>"
+                    f"<p>Subject: {escape(str(package.get('subject', '')))}</p>"
+                    f"<p>Message:</p><pre>{escape(str(package.get('body', '')))}</pre>"
+                    f"<p>Attachment: {escape(str(package.get('attachment_name', '')))} · SHA-256 <code>{escape(str(package.get('attachment_sha256', '')))}</code></p>"
+                    f"<p>Provider: {escape(str(package.get('provider', '')).title())}. This draft is local and encrypted; nothing has been sent.</p>"
+                    f"{send_form}</article>"
+                )
+            elif outbox and outbox["state"] != "CANCELLED":
+                email_cards.append(
+                    f"<article class='metric-card'><h3>Email application #{item['id']} · {escape(str(outbox['state']))}</h3>"
+                    f"<p>{escape(str(outbox.get('message') or 'No delivery confirmation is available.'))}</p></article>"
+                )
+            elif item["status"] == "QUEUED" and item["queue_state"] == "READY":
+                job_link = str(job.get("application_url", ""))
+                if repository.mail_send_connection() and Path(str(item.get("cv_path") or "")).is_file():
+                    email_cards.append(
+                        f"<article class='metric-card'><h3>Prepare email application #{item['id']}</h3>"
+                        f"<p>{escape(str(job.get('company', 'Employer')))} · {escape(str(job.get('title', 'Job')))}. Enter only an address shown on the current employer posting; confirm below. This creates a local encrypted draft only.</p>"
+                        f"<p><a href='{escape(job_link)}' target='_blank' rel='noopener noreferrer'>Open reviewed employer listing</a></p>"
+                        f"<form method='post' action='/email/applications/{item['id']}/draft'>"
+                        f"<input type='hidden' name='csrf_token' value='{csrf}'>"
+                        "<label>Employer email from the current posting <input name='recipient' type='email' maxlength='320' required autocomplete='off'></label>"
+                        "<label><input type='checkbox' name='confirm_recipient_from_posting' value='yes' required> I copied this address from the current employer listing.</label>"
+                        "<button>Prepare encrypted draft · does not send</button></form></article>"
+                    )
         rows = "".join(row_markup) or "<tr><td colspan='5'>No applications tracked yet.</td></tr>"
         timelines = "".join(
             f"<details><summary>Application {item['id']} timeline</summary><ul>"
@@ -881,7 +945,10 @@ def create_app(
         ) or "<p>No submission evidence yet.</p>"
         message = f"<p class='notice' role='status'>{escape(notice)}</p>" if notice else ""
         review_markup = "".join(reviews)
-        return _page("Applications", f"<section><p>Track status, CV used, notes, and safe submission evidence. No credentials are stored.</p>{message}{review_markup}<table><tr><th>ID</th><th>Status</th><th>CV used</th><th>Latest note</th><th>Action</th></tr>{rows}</table><h3>Timeline</h3>{timelines}<h3>Submission evidence</h3>{evidence}</section>")
+        email_cards_markup = "".join(email_cards) or "<p class='empty-state'>No email drafts need review.</p>"
+        response = _page("Applications", f"<section><p>Track status, CV used, notes, and safe submission evidence. No credentials are stored.</p>{message}{review_markup}<table><tr><th>ID</th><th>Status</th><th>CV used</th><th>Latest note</th><th>Action</th></tr>{rows}</table><h3>Email application outbox</h3><p>Every outgoing message requires separate send-only OAuth permission and confirmation of the exact recipient, body and PDF. Provider acceptance is not proof of delivery. An uncertain result is never automatically retried.</p>{email_cards_markup}<h3>Timeline</h3>{timelines}<h3>Submission evidence</h3>{evidence}</section>")
+        _set_local_form_cookie(response, app)
+        return response
 
     @app.post("/applications/{application_id}/approve")
     def approve_application(application_id: int, package_hash: str = Form(...)) -> RedirectResponse:
@@ -1068,8 +1135,16 @@ def create_app(
             for value, label in (("environment", "Use local environment configuration"), ("none", "Off · manual text review"), ("tesseract", "Local Tesseract OCR"))
         )
         autopilot_authorized = repository.autopilot_authorized()
+        email_send_autopilot_authorized = repository.email_send_autopilot_authorized()
+        email_send_connection = repository.mail_send_connection()
         paused = repository.setting("automation_paused") == "true"
-        form = f"<form class='settings-form' method='post' action='/settings'><div class='settings-group'><h3>Application controls</h3><div class='settings-fields'><label>Application mode <select name='application_mode'><option value='review_everything'{' selected' if application_mode == 'review_everything' else ''}>Review Everything</option><option value='smart_approval'{' selected' if application_mode == 'smart_approval' else ''}>Smart Approval · review each exact package</option><option value='autopilot'{' selected' if application_mode == 'autopilot' else ''}>Full Autopilot · no per-job prompts</option></select></label><label>Daily application limit <input name='daily_limit' type='number' min='0' value='{escape(repository.setting('daily_limit') or '0')}'></label><label>Dry Run <select name='dry_run'><option value='true'{' selected' if dry_run else ''}>On · prepare only, no final submission</option><option value='false'{' selected' if not dry_run else ''}>Off · allow authorized external submissions</option></select></label><label>Emergency stop <select name='automation_paused'><option value='false'{' selected' if not paused else ''}>Running when worker is started</option><option value='true'{' selected' if paused else ''}>Paused · block new submissions</option></select></label><label>AI usage <select name='ai_usage_mode'><option value='minimal'{' selected' if ai_usage_mode == 'minimal' else ''}>Minimal</option><option value='balanced'{' selected' if ai_usage_mode == 'balanced' else ''}>Balanced</option><option value='quality'{' selected' if ai_usage_mode == 'quality' else ''}>Quality</option></select></label></div><p>Smart Approval shows the complete answers and CV checksum, then waits for approval of that exact package. Full Autopilot can submit within the separate 30-day grant, saved job preferences, and daily limit.</p><label><input type='checkbox' name='autopilot_ack' value='yes'{' checked' if autopilot_authorized else ''}> I authorize Full Autopilot to submit eligible applications without per-job prompts for 30 days, within the saved preferences and daily limit, using confirmed information.</label><p>CAPTCHA, sign-in, unknown or conflicting required answers, high-risk/legal declarations, expired/unverified listings, and unsupported forms always wait for you. Changing candidate facts, answers, role/source preferences or the daily limit invalidates this grant. The localhost app manages its worker while open; install the optional browser extra and Chromium for form handling.</p></div><div class='settings-group'><h3>Scanned CV OCR</h3><p>OCR is optional and runs locally. OCR-derived text remains unconfirmed and retains its PDF page evidence. If no provider is available, SampoAgent will stop and ask you to use text entry.</p><label>OCR provider <select name='ocr_provider'>{ocr_options}</select></label></div><div class='settings-group'><h3>Job preferences &amp; search</h3><p>Comma-separated values are treated as alternatives. Radius is saved for future distance-aware matching; missing posting locations are not guessed.</p><div class='settings-fields'>{prefs_fields}</div></div><div class='settings-group'><h3>Explainable scoring configuration</h3><p>Enabled dimensions are reweighted automatically. A job must meet every enabled minimum.</p><div class='settings-fields'>{score_inputs}</div></div><button>Save settings</button></form>"
+        send_email_ack_disabled = " disabled" if not email_send_connection else ""
+        email_send_scope_copy = (
+            "Separate email Autopilot is off. Connect the send-only account in Email settings first."
+            if not email_send_connection else
+            "Optional separate grant: once you have confirmed the recipient address on each current employer posting and created the encrypted email draft, Full Autopilot may send that exact template + archived PDF without another per-email click. It is limited to the same roles, sources, preferences and daily cap, expires with the 30-day Autopilot grant, and never sends follow-ups or accepts offers. Revoke it by unchecking this box, pausing automation, changing scope, or disconnecting the send account."
+        )
+        form = f"<form class='settings-form' method='post' action='/settings'><div class='settings-group'><h3>Application controls</h3><div class='settings-fields'><label>Application mode <select name='application_mode'><option value='review_everything'{' selected' if application_mode == 'review_everything' else ''}>Review Everything</option><option value='smart_approval'{' selected' if application_mode == 'smart_approval' else ''}>Smart Approval · review each exact package</option><option value='autopilot'{' selected' if application_mode == 'autopilot' else ''}>Full Autopilot · no per-job prompts</option></select></label><label>Daily application limit <input name='daily_limit' type='number' min='0' value='{escape(repository.setting('daily_limit') or '0')}'></label><label>Dry Run <select name='dry_run'><option value='true'{' selected' if dry_run else ''}>On · prepare only, no final submission</option><option value='false'{' selected' if not dry_run else ''}>Off · allow authorized external submissions</option></select></label><label>Emergency stop <select name='automation_paused'><option value='false'{' selected' if not paused else ''}>Running when worker is started</option><option value='true'{' selected' if paused else ''}>Paused · block new submissions</option></select></label><label>AI usage <select name='ai_usage_mode'><option value='minimal'{' selected' if ai_usage_mode == 'minimal' else ''}>Minimal</option><option value='balanced'{' selected' if ai_usage_mode == 'balanced' else ''}>Balanced</option><option value='quality'{' selected' if ai_usage_mode == 'quality' else ''}>Quality</option></select></label></div><p>Smart Approval shows the complete answers and CV checksum, then waits for approval of that exact package. Full Autopilot can submit within the separate 30-day grant, saved job preferences, and daily limit.</p><label><input type='checkbox' name='autopilot_ack' value='yes'{' checked' if autopilot_authorized else ''}> I authorize Full Autopilot to submit eligible applications without per-job prompts for 30 days, within the saved preferences and daily limit, using confirmed information.</label><p>CAPTCHA, sign-in, unknown or conflicting required answers, high-risk/legal declarations, expired/unverified listings, and unsupported forms always wait for you. Changing candidate facts, answers, role/source preferences or the daily limit invalidates this grant. The localhost app manages its worker while open; install the optional browser extra and Chromium for form handling.</p><h3>Separate email-send Autopilot</h3><p>{email_send_scope_copy}</p><label><input type='checkbox' name='email_send_autopilot_ack' value='yes'{' checked' if email_send_autopilot_authorized else ''}{send_email_ack_disabled}> I separately authorize automatic sending of eligible, candidate-confirmed email application packages for up to 30 days.</label></div><div class='settings-group'><h3>Scanned CV OCR</h3><p>OCR is optional and runs locally. OCR-derived text remains unconfirmed and retains its PDF page evidence. If no provider is available, SampoAgent will stop and ask you to use text entry.</p><label>OCR provider <select name='ocr_provider'>{ocr_options}</select></label></div><div class='settings-group'><h3>Job preferences &amp; search</h3><p>Comma-separated values are treated as alternatives. Radius is saved for future distance-aware matching; missing posting locations are not guessed.</p><div class='settings-fields'>{prefs_fields}</div></div><div class='settings-group'><h3>Explainable scoring configuration</h3><p>Enabled dimensions are reweighted automatically. A job must meet every enabled minimum.</p><div class='settings-fields'>{score_inputs}</div></div><button>Save settings</button></form>"
         disabled = ", ".join(f"{name.replace('_', ' ').title()} is disabled" for name, config in configs.items() if not config.enabled) or "No disabled dimensions"
         cache_form = "<form method='post' action='/settings/cache/clear'><button>Clear semantic cache</button></form>"
         message = f"<p class='notice' role='status'>{escape(notice)}</p>" if notice else ""
@@ -1161,9 +1236,10 @@ def create_app(
         include_recruitment_agencies: str = Form("yes"),
         dry_run: str = Form("true"),
         autopilot_ack: str = Form("no"),
+        email_send_autopilot_ack: str = Form("no"),
         automation_paused: str = Form("false"),
     ) -> RedirectResponse:
-        if application_mode not in {"review_everything", "smart_approval", "autopilot"} or ai_usage_mode not in {"minimal", "balanced", "quality"} or ocr_provider not in {"environment", "none", "tesseract"} or dry_run not in {"true", "false"} or autopilot_ack not in {"yes", "no"} or automation_paused not in {"true", "false"} or work_type not in {"any", "onsite", "hybrid", "remote"} or employment_type not in {"any", "full_time", "part_time", "temporary", "seasonal"} or schedule not in {"any", "day", "evening", "night", "weekend"} or include_public_sector not in {"yes", "no"} or include_recruitment_agencies not in {"yes", "no"} or daily_limit < 0 or salary_minimum < 0 or not 0 <= radius_km <= 500:
+        if application_mode not in {"review_everything", "smart_approval", "autopilot"} or ai_usage_mode not in {"minimal", "balanced", "quality"} or ocr_provider not in {"environment", "none", "tesseract"} or dry_run not in {"true", "false"} or autopilot_ack not in {"yes", "no"} or email_send_autopilot_ack not in {"yes", "no"} or automation_paused not in {"true", "false"} or work_type not in {"any", "onsite", "hybrid", "remote"} or employment_type not in {"any", "full_time", "part_time", "temporary", "seasonal"} or schedule not in {"any", "day", "evening", "night", "weekend"} or include_public_sector not in {"yes", "no"} or include_recruitment_agencies not in {"yes", "no"} or daily_limit < 0 or salary_minimum < 0 or not 0 <= radius_km <= 500:
             return RedirectResponse("/settings?notice=" + quote("Check the application and search preference values; nothing was changed."), status_code=303)
         raw_dimensions = {
             "eligibility": (eligibility_enabled, eligibility_weight, eligibility_minimum),
@@ -1196,6 +1272,7 @@ def create_app(
         })
         full_auto_requested = application_mode == "autopilot" and autopilot_ack == "yes"
         live_mode_requested = application_mode == "smart_approval" or full_auto_requested
+        email_send_notice = ""
         if dry_run == "false" and daily_limit <= 0:
             repository.revoke_autopilot("Daily limit removed")
             repository.set_setting("dry_run", "true")
@@ -1216,13 +1293,29 @@ def create_app(
                     repository.set_setting("dry_run", "true")
                     sync_automation_worker()
                     return RedirectResponse("/settings?notice=" + quote("Autopilot authorization could not be created. Check that a search target is active; Dry Run remains on."), status_code=303)
+                if email_send_autopilot_ack == "yes":
+                    try:
+                        repository.grant_email_send_autopilot()
+                    except ValueError:
+                        repository.revoke_autopilot("Email Autopilot grant requirements were not met")
+                        repository.set_setting("dry_run", "true")
+                        sync_automation_worker()
+                        return RedirectResponse("/settings?notice=" + quote("Email Autopilot requires a separate send-only email connection. No Autopilot grant was enabled."), status_code=303)
+                else:
+                    repository.connection.execute("UPDATE settings SET value='false' WHERE key='email_send_autopilot_authorized'")
+                    repository.connection.execute("UPDATE settings SET value='' WHERE key IN ('email_send_autopilot_fingerprint','email_send_autopilot_expires_at')")
+                    repository.connection.commit()
             else:
                 repository.revoke_autopilot("Autopilot grant not selected")
+                if email_send_autopilot_ack == "yes":
+                    email_send_notice = " Email Autopilot was not enabled because Full Autopilot was not authorized."
         else:
             repository.revoke_autopilot("Automated submissions disabled")
             repository.set_setting("dry_run", "true")
+            if email_send_autopilot_ack == "yes":
+                email_send_notice = " Email Autopilot remains off while Dry Run or the emergency stop blocks submissions."
         sync_automation_worker()
-        return RedirectResponse("/settings?notice=" + quote("Settings saved. CAPTCHA tasks are handled manually in the CAPTCHA Queue."), status_code=303)
+        return RedirectResponse("/settings?notice=" + quote("Settings saved. CAPTCHA tasks are handled manually in the CAPTCHA Queue." + email_send_notice), status_code=303)
 
     @app.post("/settings/cache/clear")
     def clear_semantic_cache() -> RedirectResponse:
@@ -1230,9 +1323,14 @@ def create_app(
         return RedirectResponse("/settings?notice=" + quote("Semantic cache cleared."), status_code=303)
 
     @app.get("/settings/email", response_class=HTMLResponse)
-    def email_settings(notice: str = Query(default="")) -> HTMLResponse:
+    def email_settings(request: Request, notice: str = Query(default="")) -> HTMLResponse:
         connection = repository.mailbox_connection()
-        encrypted = bool(repository.mailbox_ciphertext())
+        send_connection = repository.mail_send_connection()
+        try:
+            encrypt_token_payload({"setup_check": True})
+            encrypted = True
+        except EmailIntegrationError:
+            encrypted = False
         providers = []
         for provider, label in (("gmail", "Gmail"), ("microsoft", "Microsoft Outlook")):
             try:
@@ -1259,8 +1357,30 @@ def create_app(
 
         message_cards = "".join(render_message(item) for item in messages) or "<p class='empty-state'>No unreviewed likely job responses. Sync the inbox after you have applied.</p>"
         message = f"<p class='notice' role='status'>{escape(notice)}</p>" if notice else ""
+        csrf = str(app.state.local_action_token)
+        if send_connection:
+            send_connected = (
+                f"<p class='notice'>Separate send-only account connected: {escape(str(send_connection['provider']).title())}. "
+                "It cannot read your inbox through this grant. Each email is shown for exact review and requires a one-time confirmation.</p>"
+                f"<form method='post' action='/email/send/disconnect'><input type='hidden' name='csrf_token' value='{csrf}'><button class='danger'>Disconnect send-only permission</button></form>"
+            )
+        else:
+            send_buttons = []
+            for provider, label in (("gmail", "Gmail"), ("microsoft", "Outlook")):
+                try:
+                    OAuthConfig.from_environment(provider)
+                    configured = True
+                except EmailIntegrationError:
+                    configured = False
+                send_buttons.append(
+                    f"<form method='post' action='/email/send/connect/{provider}'><input type='hidden' name='csrf_token' value='{csrf}'>"
+                    f"<button {'disabled' if not (configured and encrypted) else ''}>Connect {label} send-only permission</button></form>"
+                )
+            send_connected = "<p>Outgoing email requires a separate OAuth permission. It is never added to the read-only inbox grant.</p>" + "".join(send_buttons)
         setup = "<p class='notice'>Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, MICROSOFT_CLIENT_ID, MICROSOFT_CLIENT_SECRET and SAMPOAGENT_TOKEN_ENCRYPTION_KEY in your local environment. Register the exact callback URLs shown in .env.example. Secrets are never entered in this page.</p>"
-        return _page("Email", f"<section><h2>Read-only inbox connection</h2><p>Authorize only the inbox you want SampoAgent to check. The app does not send, move, or delete email. Detected replies are suggestions until you confirm them.</p>{message}{setup}<div class='metric-grid'>{''.join(providers)}</div>{connected}</section><section><h2>Review possible application replies</h2>{message_cards}</section>", path="/settings/email")
+        response = _page("Email", f"<section><h2>Read-only inbox connection</h2><p>Authorize only the inbox you want SampoAgent to check. This connection never sends, moves, or deletes email. Detected replies are suggestions until you confirm them.</p>{message}{setup}<div class='metric-grid'>{''.join(providers)}</div>{connected}</section><section><h2>Separate outgoing email permission</h2><p>This optional send-only OAuth grant is separate from inbox reading. Application email drafts stay encrypted locally and are not sent until you review and confirm that exact message and PDF on the Applications page. A provider acceptance is not delivery confirmation; uncertain sends are not retried.</p>{send_connected}<p><a href='/applications'>Review application email drafts</a></p></section><section><h2>Review possible application replies</h2>{message_cards}</section>", path="/settings/email")
+        _set_local_form_cookie(response, app)
+        return response
 
     @app.post("/email/connect/{provider}")
     def connect_email(provider: str):
@@ -1272,8 +1392,26 @@ def create_app(
         state = secrets.token_urlsafe(32)
         verifier, challenge = create_pkce_pair()
         app.state.email_oauth_states = {key: value for key, value in app.state.email_oauth_states.items() if float(value.get("expires_at", 0)) >= time.time()}
-        app.state.email_oauth_states[state] = {"provider": provider, "verifier": verifier, "expires_at": time.time() + 600}
-        response = RedirectResponse(authorization_url(config, state=state, challenge=challenge), status_code=303)
+        app.state.email_oauth_states[state] = {"provider": provider, "purpose": "read", "verifier": verifier, "expires_at": time.time() + 600}
+        response = RedirectResponse(authorization_url(config, state=state, challenge=challenge, purpose="read"), status_code=303)
+        response.set_cookie("sampoagent_email_oauth_state", state, httponly=True, samesite="lax", secure=False, max_age=600, path=f"/email/callback/{provider}")
+        return response
+
+    @app.post("/email/send/connect/{provider}")
+    def connect_email_send(provider: str, request: Request, csrf_token: str = Form(...)):
+        if not _local_form_token_matches(request, csrf_token, app):
+            return RedirectResponse("/settings/email?notice=" + quote("Refresh this local page before changing email permissions."), status_code=303)
+        try:
+            config = OAuthConfig.from_environment(provider)
+            encrypt_token_payload({"setup_check": True})
+            required_email_scope(provider, "send")
+        except EmailIntegrationError:
+            return RedirectResponse("/settings/email?notice=" + quote("Email send setup is not ready. Check the local provider settings and try again."), status_code=303)
+        state = secrets.token_urlsafe(32)
+        verifier, challenge = create_pkce_pair()
+        app.state.email_oauth_states = {key: value for key, value in app.state.email_oauth_states.items() if float(value.get("expires_at", 0)) >= time.time()}
+        app.state.email_oauth_states[state] = {"provider": provider, "purpose": "send", "verifier": verifier, "expires_at": time.time() + 600}
+        response = RedirectResponse(authorization_url(config, state=state, challenge=challenge, purpose="send"), status_code=303)
         response.set_cookie("sampoagent_email_oauth_state", state, httponly=True, samesite="lax", secure=False, max_age=600, path=f"/email/callback/{provider}")
         return response
 
@@ -1292,11 +1430,19 @@ def create_app(
             try:
                 config = OAuthConfig.from_environment(provider)
                 tokens = exchange_code(config, code=request.query_params["code"], verifier=str(pending["verifier"]))
+                purpose = str(pending.get("purpose", "read"))
                 if not tokens.get("refresh_token"):
-                    raise EmailIntegrationError("Provider did not issue offline refresh access. Re-authorize and approve continued read-only access.")
+                    raise EmailIntegrationError("Provider did not issue offline refresh access. Re-authorize the requested email permission.")
                 tokens["expires_at"] = time.time() + float(tokens.get("expires_in", 3600))
-                repository.save_mailbox_connection(provider, encrypt_token_payload(tokens))
-                response = RedirectResponse("/settings/email?notice=" + quote("Mailbox connected securely."), status_code=303)
+                if purpose == "send":
+                    granted_scopes = str(tokens.get("scope", ""))
+                    if required_email_scope(provider, "send") not in granted_scopes.split():
+                        raise EmailIntegrationError("Provider did not grant the separate email-send permission.")
+                    repository.save_mail_send_connection(provider, encrypt_token_payload(tokens), granted_scopes)
+                    response = RedirectResponse("/settings/email?notice=" + quote("Separate email-send permission connected securely."), status_code=303)
+                else:
+                    repository.save_mailbox_connection(provider, encrypt_token_payload(tokens))
+                    response = RedirectResponse("/settings/email?notice=" + quote("Mailbox connected securely."), status_code=303)
             except (EmailIntegrationError, TypeError, ValueError):
                 response = RedirectResponse("/settings/email?notice=" + quote("Could not finish email authorization. Check local provider setup and try again."), status_code=303)
         response.delete_cookie("sampoagent_email_oauth_state", path=f"/email/callback/{provider}")
@@ -1328,6 +1474,76 @@ def create_app(
     def disconnect_email() -> RedirectResponse:
         repository.remove_mailbox_connection()
         return RedirectResponse("/settings/email?notice=" + quote("Mailbox disconnected and synced metadata removed."), status_code=303)
+
+    @app.post("/email/send/disconnect")
+    def disconnect_email_send(request: Request, csrf_token: str = Form(...)) -> RedirectResponse:
+        if not _local_form_token_matches(request, csrf_token, app):
+            return RedirectResponse("/settings/email?notice=" + quote("Refresh this local page before changing email permissions."), status_code=303)
+        repository.remove_mail_send_connection()
+        return RedirectResponse("/settings/email?notice=" + quote("Separate email-send permission disconnected."), status_code=303)
+
+    @app.post("/email/applications/{application_id}/draft")
+    def create_application_email(
+        application_id: int,
+        request: Request,
+        recipient: str = Form(...),
+        confirm_recipient_from_posting: str = Form(""),
+        csrf_token: str = Form(...),
+    ) -> RedirectResponse:
+        if not _local_form_token_matches(request, csrf_token, app):
+            notice = "Refresh the Applications page before preparing an email draft."
+        else:
+            try:
+                create_application_email_draft(
+                    repository,
+                    app.state.storage_dir,
+                    application_id,
+                    recipient=recipient,
+                    confirm_recipient_from_posting=confirm_recipient_from_posting == "yes",
+                )
+                notice = "Encrypted local email draft prepared. It has not been sent; review the exact package in the outbox."
+            except EmailOutboxError as exc:
+                notice = str(exc)
+        return RedirectResponse("/applications?notice=" + quote(notice), status_code=303)
+
+    @app.post("/email/applications/{application_id}/cancel")
+    def cancel_application_email(application_id: int, request: Request, csrf_token: str = Form(...)) -> RedirectResponse:
+        if not _local_form_token_matches(request, csrf_token, app):
+            notice = "Refresh the Applications page before changing an email draft."
+        else:
+            cancelled = repository.cancel_email_outbox(application_id)
+            notice = "Unsent encrypted draft discarded. You may prepare a corrected draft." if cancelled else "Only a not-yet-attempted draft can be discarded."
+        return RedirectResponse("/applications?notice=" + quote(notice), status_code=303)
+
+    @app.post("/email/applications/{application_id}/send")
+    def send_application_email_route(
+        application_id: int,
+        request: Request,
+        package_hash: str = Form(...),
+        send_confirmation: str = Form(""),
+        csrf_token: str = Form(...),
+    ) -> RedirectResponse:
+        if not _local_form_token_matches(request, csrf_token, app):
+            notice = "Refresh the Applications page before sending. No email was sent."
+        else:
+            try:
+                result = send_approved_application_email(
+                    repository,
+                    app.state.storage_dir,
+                    application_id,
+                    package_hash=package_hash,
+                    confirmed=send_confirmation == "yes",
+                    sender=send_email_message,
+                )
+                if result.state == "ACCEPTED":
+                    notice = "Email provider accepted this one request. Delivery is not confirmed, and SampoAgent will not retry it."
+                elif result.state == "UNKNOWN":
+                    notice = "Email outcome is uncertain. SampoAgent will not retry; check the Sent folder or contact the employer before taking further action."
+                else:
+                    notice = "The provider rejected the email. This attempt will not be repeated automatically."
+            except EmailOutboxError as exc:
+                notice = str(exc)
+        return RedirectResponse("/applications?notice=" + quote(notice), status_code=303)
 
     @app.post("/email/messages/{message_id}/confirm")
     def confirm_email_response(message_id: int, application_id: int = Form(...), status: str = Form(...)) -> RedirectResponse:

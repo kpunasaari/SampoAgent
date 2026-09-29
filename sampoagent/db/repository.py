@@ -88,6 +88,8 @@ class Repository:
             CREATE TABLE IF NOT EXISTS discovery_source_results (id INTEGER PRIMARY KEY, run_id INTEGER NOT NULL, source_id INTEGER, source_name TEXT NOT NULL, source_url TEXT NOT NULL, capability TEXT NOT NULL, status TEXT NOT NULL, jobs_found INTEGER NOT NULL DEFAULT 0, imported_count INTEGER NOT NULL DEFAULT 0, duplicates_count INTEGER NOT NULL DEFAULT 0, message TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, FOREIGN KEY(run_id) REFERENCES discovery_runs(id) ON DELETE CASCADE);
             CREATE TABLE IF NOT EXISTS discovery_source_state (source_id INTEGER PRIMARY KEY, consecutive_failures INTEGER NOT NULL DEFAULT 0, last_status TEXT NOT NULL DEFAULT '', last_message TEXT NOT NULL DEFAULT '', last_checked_at TEXT, last_success_at TEXT, next_attempt_at TEXT, FOREIGN KEY(source_id) REFERENCES job_sources(id) ON DELETE CASCADE);
             CREATE TABLE IF NOT EXISTS mailbox_connection (id INTEGER PRIMARY KEY CHECK(id=1), provider TEXT NOT NULL, token_ciphertext TEXT NOT NULL, connected_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS mail_send_connection (id INTEGER PRIMARY KEY CHECK(id=1), provider TEXT NOT NULL, token_ciphertext TEXT NOT NULL, granted_scopes TEXT NOT NULL, connected_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS email_outbox (id INTEGER PRIMARY KEY, application_id INTEGER NOT NULL UNIQUE, provider TEXT NOT NULL CHECK(provider IN ('gmail','microsoft')), idempotency_key TEXT NOT NULL UNIQUE, package_hash TEXT NOT NULL, payload_ciphertext TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('READY','SENDING','ACCEPTED','UNKNOWN','FAILED_FINAL','CANCELLED')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, provider_reference TEXT NOT NULL DEFAULT '', message TEXT NOT NULL DEFAULT '', FOREIGN KEY(application_id) REFERENCES applications(id) ON DELETE CASCADE);
             CREATE TABLE IF NOT EXISTS mailbox_messages (id INTEGER PRIMARY KEY, provider TEXT NOT NULL, provider_message_id TEXT NOT NULL, sender TEXT NOT NULL, subject TEXT NOT NULL, snippet TEXT NOT NULL, received_at TEXT NOT NULL, link TEXT NOT NULL, reviewed INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, UNIQUE(provider, provider_message_id));
             CREATE TABLE IF NOT EXISTS captcha_tasks (id INTEGER PRIMARY KEY, application_id INTEGER NOT NULL UNIQUE, detected_url TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'WAITING_USER', note TEXT NOT NULL DEFAULT '', outcome TEXT, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, FOREIGN KEY(application_id) REFERENCES applications(id));
             CREATE TABLE IF NOT EXISTS application_claims (job_id INTEGER PRIMARY KEY, application_id INTEGER NOT NULL UNIQUE, FOREIGN KEY(job_id) REFERENCES jobs(id), FOREIGN KEY(application_id) REFERENCES applications(id));
@@ -162,6 +164,9 @@ class Repository:
             "autopilot_authorized": "false",
             "autopilot_grant_fingerprint": "",
             "autopilot_grant_expires_at": "",
+            "email_send_autopilot_authorized": "false",
+            "email_send_autopilot_fingerprint": "",
+            "email_send_autopilot_expires_at": "",
             "automation_paused": "false",
             "ocr_provider": "environment",
         }.items():
@@ -993,6 +998,269 @@ class Repository:
         row = self.connection.execute("SELECT token_ciphertext FROM mailbox_connection WHERE id=1").fetchone()
         return str(row[0]) if row else None
 
+    def mail_send_connection(self) -> dict[str, object] | None:
+        row = self.connection.execute(
+            "SELECT id, provider, granted_scopes, connected_at FROM mail_send_connection WHERE id=1"
+        ).fetchone()
+        return dict(row) if row else None
+
+    def mail_send_ciphertext(self) -> str | None:
+        row = self.connection.execute("SELECT token_ciphertext FROM mail_send_connection WHERE id=1").fetchone()
+        return str(row[0]) if row else None
+
+    def save_mail_send_connection(self, provider: str, token_ciphertext: str, granted_scopes: str) -> None:
+        if provider not in {"gmail", "microsoft"} or not token_ciphertext.strip():
+            raise ValueError("A supported provider and encrypted send token are required")
+        scopes = set(granted_scopes.split())
+        required_scope = (
+            "https://www.googleapis.com/auth/gmail.send"
+            if provider == "gmail"
+            else "Mail.Send"
+        )
+        if required_scope not in scopes:
+            raise ValueError("The separate email-send permission was not granted")
+        self.connection.execute(
+            "INSERT INTO mail_send_connection(id,provider,token_ciphertext,granted_scopes,connected_at) "
+            "VALUES (1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET provider=excluded.provider, "
+            "token_ciphertext=excluded.token_ciphertext, granted_scopes=excluded.granted_scopes, connected_at=excluded.connected_at",
+            (provider, token_ciphertext, " ".join(sorted(scopes)), datetime.now(timezone.utc).isoformat()),
+        )
+        self.log("mail_send_connected", provider)
+        self.connection.commit()
+
+    def refresh_mail_send_connection(self, token_ciphertext: str) -> None:
+        """Replace an encrypted access token without renewing consent or its grant binding."""
+        if not token_ciphertext.strip():
+            raise ValueError("An encrypted send token is required")
+        with self.connection:
+            cursor = self.connection.execute(
+                "UPDATE mail_send_connection SET token_ciphertext=? WHERE id=1",
+                (token_ciphertext,),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("Separate email-send permission is not connected")
+
+    def create_email_outbox(
+        self,
+        *,
+        application_id: int,
+        provider: str,
+        package_hash: str,
+        idempotency_key: str,
+        payload_ciphertext: str,
+    ) -> dict[str, object]:
+        if provider not in {"gmail", "microsoft"} or not all((package_hash, idempotency_key, payload_ciphertext)):
+            raise ValueError("A valid provider and encrypted package are required")
+        now = datetime.now(timezone.utc).isoformat()
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            application = self.connection.execute(
+                "SELECT status,queue_state FROM applications WHERE id=?", (application_id,)
+            ).fetchone()
+            if not application or application["status"] != "QUEUED" or application["queue_state"] not in {"READY", "EMAIL_READY"}:
+                self.connection.rollback()
+                raise ValueError("Only a ready queued application may have an email draft")
+            existing = self.connection.execute(
+                "SELECT id,state FROM email_outbox WHERE application_id=?", (application_id,)
+            ).fetchone()
+            if existing:
+                if existing["state"] != "CANCELLED":
+                    self.connection.rollback()
+                    raise ValueError("An email draft already exists for this application")
+                self.connection.execute(
+                    "UPDATE email_outbox SET provider=?,idempotency_key=?,package_hash=?,payload_ciphertext=?,state='READY',created_at=?,updated_at=?,started_at=NULL,finished_at=NULL,provider_reference='',message='' WHERE id=?",
+                    (provider, idempotency_key, package_hash, payload_ciphertext, now, now, int(existing["id"])),
+                )
+            else:
+                self.connection.execute(
+                    "INSERT INTO email_outbox(application_id,provider,idempotency_key,package_hash,payload_ciphertext,state,created_at,updated_at) VALUES (?,?,?,?,?,'READY',?,?)",
+                    (application_id, provider, idempotency_key, package_hash, payload_ciphertext, now, now),
+                )
+            self.connection.execute(
+                "UPDATE applications SET queue_state='EMAIL_READY',updated_at=? WHERE id=? AND status='QUEUED' AND queue_state IN ('READY','EMAIL_READY')",
+                (now, application_id),
+            )
+            self.log("application_email_draft_created", f"{application_id}:{package_hash[:12]}")
+            self.connection.commit()
+        except Exception:
+            if self.connection.in_transaction:
+                self.connection.rollback()
+            raise
+        result = self.email_outbox_for_application(application_id)
+        if not result:
+            raise RuntimeError("Email draft could not be read after creation")
+        return result
+
+    def email_outbox_for_application(self, application_id: int) -> dict[str, object] | None:
+        row = self.connection.execute(
+            "SELECT id,application_id,provider,idempotency_key,package_hash,state,created_at,updated_at,started_at,finished_at,provider_reference,message FROM email_outbox WHERE application_id=?",
+            (application_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def email_outbox_payload_ciphertext(self, application_id: int) -> str | None:
+        row = self.connection.execute(
+            "SELECT payload_ciphertext FROM email_outbox WHERE application_id=?", (application_id,)
+        ).fetchone()
+        return str(row[0]) if row else None
+
+    def email_outbox_items(self) -> list[dict[str, object]]:
+        return [dict(row) for row in self.connection.execute(
+            "SELECT id,application_id,provider,idempotency_key,package_hash,state,created_at,updated_at,started_at,finished_at,provider_reference,message FROM email_outbox ORDER BY id DESC"
+        )]
+
+    def ready_email_outbox_items(self) -> list[dict[str, object]]:
+        return [dict(row) for row in self.connection.execute(
+            "SELECT e.id,e.application_id,e.provider,e.package_hash,e.state,e.created_at FROM email_outbox e "
+            "JOIN applications a ON a.id=e.application_id WHERE e.state='READY' AND a.status='QUEUED' "
+            "AND a.queue_state='EMAIL_READY' ORDER BY e.created_at,e.id"
+        )]
+
+    def cancel_email_outbox(self, application_id: int) -> bool:
+        now = datetime.now(timezone.utc).isoformat()
+        with self.connection:
+            cursor = self.connection.execute(
+                "UPDATE email_outbox SET state='CANCELLED',updated_at=?,finished_at=?,payload_ciphertext='',message='Draft cancelled before any send attempt' WHERE application_id=? AND state='READY'",
+                (now, now, application_id),
+            )
+            if cursor.rowcount:
+                self.connection.execute(
+                    "UPDATE applications SET queue_state='READY',updated_at=? WHERE id=? AND status='QUEUED' AND queue_state='EMAIL_READY'",
+                    (now, application_id),
+                )
+                self.log("application_email_draft_cancelled", str(application_id))
+            return cursor.rowcount == 1
+
+    def claim_email_outbox(
+        self,
+        application_id: int,
+        *,
+        package_hash: str,
+        daily_limit: int,
+        expected_scope_fingerprint: str,
+        require_email_autopilot: bool = False,
+    ) -> dict[str, object] | None:
+        """Atomically reserve a daily slot and permit a single provider call."""
+        now = datetime.now(timezone.utc).isoformat()
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            outbox = self.connection.execute(
+                "SELECT id,provider,idempotency_key,package_hash,payload_ciphertext,state FROM email_outbox WHERE application_id=?",
+                (application_id,),
+            ).fetchone()
+            application = self.connection.execute(
+                "SELECT status,queue_state FROM applications WHERE id=?", (application_id,)
+            ).fetchone()
+            settings = {row[0]: row[1] for row in self.connection.execute(
+                "SELECT key,value FROM settings WHERE key IN ('application_mode','dry_run','automation_paused','daily_limit')"
+            )}
+            try:
+                configured_daily_limit = int(settings.get("daily_limit", "0") or "0")
+            except (TypeError, ValueError):
+                configured_daily_limit = 0
+            prior_attempt = self.connection.execute(
+                "SELECT 1 FROM application_attempts WHERE application_id=? AND state<>'CANCELLED' LIMIT 1",
+                (application_id,),
+            ).fetchone()
+            if (
+                not outbox or outbox["state"] != "READY" or outbox["package_hash"] != package_hash
+                or not application or application["status"] != "QUEUED" or application["queue_state"] != "EMAIL_READY"
+                or prior_attempt or daily_limit <= 0 or settings.get("dry_run", "true") != "false"
+                or settings.get("automation_paused", "false") == "true"
+                or configured_daily_limit != daily_limit
+                or not hmac.compare_digest(expected_scope_fingerprint, self.automation_scope_fingerprint())
+                or (settings.get("application_mode") == "autopilot" and not self.autopilot_authorized())
+                or (require_email_autopilot and not self.email_send_autopilot_authorized())
+            ):
+                self.connection.rollback()
+                return None
+            day = now[:10]
+            reserved = int(self.connection.execute(
+                "SELECT COUNT(DISTINCT a.id) FROM applications a LEFT JOIN application_attempts t ON t.application_id=a.id "
+                "LEFT JOIN email_outbox e ON e.application_id=a.id "
+                "WHERE (a.status IN ('APPLIED','APPLIED_MANUAL','EMAIL_ACCEPTED','EMAIL_SUBMITTED_UNVERIFIED') AND substr(a.updated_at,1,10)=?) "
+                "OR (substr(t.started_at,1,10)=? AND t.state IN ('SUBMITTING','SUBMITTED','UNKNOWN','CAPTCHA_HOLD')) "
+                "OR (substr(e.started_at,1,10)=? AND e.state IN ('SENDING','ACCEPTED','UNKNOWN','FAILED_FINAL'))",
+                (day, day, day),
+            ).fetchone()[0])
+            if reserved >= daily_limit:
+                self.connection.rollback()
+                return None
+            cursor = self.connection.execute(
+                "UPDATE email_outbox SET state='SENDING',started_at=?,updated_at=?,message='Single email provider attempt reserved; automatic retry disabled' WHERE id=? AND state='READY'",
+                (now, now, int(outbox["id"])),
+            )
+            if cursor.rowcount != 1:
+                self.connection.rollback()
+                return None
+            self.connection.execute(
+                "UPDATE applications SET status='EMAIL_SUBMITTING',queue_state='SUBMITTING',updated_at=? WHERE id=?",
+                (now, application_id),
+            )
+            self.connection.execute(
+                "INSERT INTO application_timeline(application_id,status,note,created_at) VALUES (?,'EMAIL_SUBMITTING','Single provider send reserved; automatic retry is disabled',?)",
+                (application_id, now),
+            )
+            self.log("application_email_send_reserved", f"{application_id}:{package_hash[:12]}")
+            self.connection.commit()
+            return dict(outbox)
+        except Exception:
+            if self.connection.in_transaction:
+                self.connection.rollback()
+            raise
+
+    def finish_email_outbox(
+        self,
+        application_id: int,
+        *,
+        state: str,
+        message: str,
+        provider_reference: str = "",
+    ) -> bool:
+        if state not in {"ACCEPTED", "UNKNOWN", "FAILED_FINAL"}:
+            raise ValueError("Unsupported final email outbox state")
+        now = datetime.now(timezone.utc).isoformat()
+        application_status = {
+            "ACCEPTED": "EMAIL_ACCEPTED",
+            "UNKNOWN": "EMAIL_SUBMITTED_UNVERIFIED",
+            "FAILED_FINAL": "EMAIL_FAILED",
+        }[state]
+        safe_message = re.sub(r"[\r\n\x00-\x1f]+", " ", message).strip()[:240]
+        safe_reference = re.sub(r"[^A-Za-z0-9._:-]", "", provider_reference)[:160]
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = self.connection.execute(
+                "UPDATE email_outbox SET state=?,updated_at=?,finished_at=?,provider_reference=?,message=? WHERE application_id=? AND state='SENDING'",
+                (state, now, now, safe_reference, safe_message, application_id),
+            )
+            if cursor.rowcount != 1:
+                self.connection.rollback()
+                return False
+            self.connection.execute(
+                "UPDATE applications SET status=?,queue_state='DO_NOT_RETRY',updated_at=?,notes=? WHERE id=?",
+                (application_status, now, safe_message, application_id),
+            )
+            self.connection.execute(
+                "INSERT INTO application_timeline(application_id,status,note,created_at) VALUES (?,?,?,?)",
+                (application_id, application_status, safe_message, now),
+            )
+            self.log("application_email_send_finished", f"{application_id}:{state}")
+            self.connection.commit()
+            return True
+        except Exception:
+            if self.connection.in_transaction:
+                self.connection.rollback()
+            raise
+
+    def remove_mail_send_connection(self) -> None:
+        self.connection.execute("DELETE FROM mail_send_connection WHERE id=1")
+        self.connection.execute("DELETE FROM settings WHERE key LIKE 'email_send_grant_%'")
+        self.connection.execute("UPDATE settings SET value='false' WHERE key='email_send_autopilot_authorized'")
+        self.connection.execute("UPDATE settings SET value='' WHERE key='email_send_autopilot_fingerprint'")
+        self.connection.execute("UPDATE settings SET value='' WHERE key='email_send_autopilot_expires_at'")
+        self.log("mail_send_disconnected", "Separate email-send authorization removed")
+        self.connection.commit()
+
     def save_mailbox_connection(self, provider: str, token_ciphertext: str) -> None:
         if provider not in {"gmail", "microsoft"} or not token_ciphertext.strip():
             raise ValueError("A supported provider and encrypted token payload are required")
@@ -1419,17 +1687,52 @@ class Repository:
         return [dict(row) for row in self.connection.execute("SELECT status, note, created_at FROM application_timeline WHERE application_id=? ORDER BY id", (application_id,))]
 
     def applications_today(self) -> int:
-        return int(self.connection.execute("SELECT COUNT(*) FROM applications WHERE status IN ('APPLIED','APPLIED_MANUAL') AND substr(updated_at, 1, 10)=?", (datetime.now(timezone.utc).date().isoformat(),)).fetchone()[0])
+        return int(self.connection.execute("SELECT COUNT(*) FROM applications WHERE status IN ('APPLIED','APPLIED_MANUAL','EMAIL_ACCEPTED','EMAIL_SUBMITTED_UNVERIFIED') AND substr(updated_at, 1, 10)=?", (datetime.now(timezone.utc).date().isoformat(),)).fetchone()[0])
 
     def submissions_reserved_today(self) -> int:
         today = datetime.now(timezone.utc).date().isoformat()
         row = self.connection.execute(
             "SELECT COUNT(DISTINCT a.id) FROM applications a LEFT JOIN application_attempts t ON t.application_id=a.id "
-            "WHERE (a.status IN ('APPLIED','APPLIED_MANUAL') AND substr(a.updated_at,1,10)=?) "
-            "OR (substr(t.started_at,1,10)=? AND t.state IN ('SUBMITTING','SUBMITTED','UNKNOWN','CAPTCHA_HOLD'))",
-            (today, today),
+            "LEFT JOIN email_outbox e ON e.application_id=a.id "
+            "WHERE (a.status IN ('APPLIED','APPLIED_MANUAL','EMAIL_ACCEPTED','EMAIL_SUBMITTED_UNVERIFIED') AND substr(a.updated_at,1,10)=?) "
+            "OR (substr(t.started_at,1,10)=? AND t.state IN ('SUBMITTING','SUBMITTED','UNKNOWN','CAPTCHA_HOLD')) "
+            "OR (substr(e.started_at,1,10)=? AND e.state IN ('SENDING','ACCEPTED','UNKNOWN','FAILED_FINAL'))",
+            (today, today, today),
         ).fetchone()
         return int(row[0])
+
+    def recover_interrupted_email_sends(self, *, stale_seconds: int = 120) -> int:
+        """Mark stale in-flight sends uncertain so they can never be replayed."""
+        if not 30 <= stale_seconds <= 3600:
+            raise ValueError("Email send recovery threshold must be from 30 seconds to one hour")
+        now = datetime.now(timezone.utc)
+        cutoff = (now - timedelta(seconds=stale_seconds)).isoformat()
+        rows = self.connection.execute(
+            "SELECT id,application_id FROM email_outbox WHERE state='SENDING' AND started_at < ?",
+            (cutoff,),
+        ).fetchall()
+        if not rows:
+            return 0
+        finished = now.isoformat()
+        with self.connection:
+            for row in rows:
+                application_id = int(row["application_id"])
+                cursor = self.connection.execute(
+                    "UPDATE email_outbox SET state='UNKNOWN',updated_at=?,finished_at=?,message='The local process stopped during send; provider outcome is uncertain and automatic retry is disabled' WHERE id=? AND state='SENDING'",
+                    (finished, finished, int(row["id"])),
+                )
+                if not cursor.rowcount:
+                    continue
+                self.connection.execute(
+                    "UPDATE applications SET status='EMAIL_SUBMITTED_UNVERIFIED',queue_state='DO_NOT_RETRY',updated_at=?,notes='Email send interrupted; check Sent folder or contact the employer before any manual retry' WHERE id=? AND status='EMAIL_SUBMITTING'",
+                    (finished, application_id),
+                )
+                self.connection.execute(
+                    "INSERT INTO application_timeline(application_id,status,note,created_at) VALUES (?,'EMAIL_SUBMITTED_UNVERIFIED','Local process stopped during send; reconcile provider state before any retry',?)",
+                    (application_id, finished),
+                )
+                self.log("application_email_interrupted", str(application_id))
+        return len(rows)
 
     def _autopilot_fingerprint(self) -> str:
         profile = self.profile() or {}
@@ -1506,8 +1809,74 @@ class Repository:
         self.connection.execute("UPDATE settings SET value='false' WHERE key='autopilot_authorized'")
         self.connection.execute("UPDATE settings SET value='' WHERE key='autopilot_grant_fingerprint'")
         self.connection.execute("UPDATE settings SET value='' WHERE key='autopilot_grant_expires_at'")
+        self.connection.execute("UPDATE settings SET value='false' WHERE key='email_send_autopilot_authorized'")
+        self.connection.execute("UPDATE settings SET value='' WHERE key='email_send_autopilot_fingerprint'")
+        self.connection.execute("UPDATE settings SET value='' WHERE key='email_send_autopilot_expires_at'")
         if active and reason:
             self.log("autopilot_revoked", reason[:160])
+
+    def _email_send_autopilot_fingerprint(self) -> str:
+        connection = self.mail_send_connection() or {}
+        payload = {
+            "automation_scope": self.automation_scope_fingerprint(),
+            "provider": connection.get("provider", ""),
+            "connected_at": connection.get("connected_at", ""),
+            "granted_scopes": connection.get("granted_scopes", ""),
+        }
+        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return sha256(canonical.encode("utf-8")).hexdigest()
+
+    def grant_email_send_autopilot(self, *, days: int = 30) -> None:
+        connection = self.mail_send_connection()
+        if (
+            not self.autopilot_authorized()
+            or self.setting("application_mode") != "autopilot"
+            or self.setting("dry_run") != "false"
+            or self.setting("automation_paused") == "true"
+            or not connection
+            or not 1 <= days <= 30
+        ):
+            raise ValueError("Email Autopilot needs an active Full Autopilot grant and a separate send-only account")
+        required_scope = "https://www.googleapis.com/auth/gmail.send" if connection["provider"] == "gmail" else "Mail.Send"
+        if required_scope not in str(connection.get("granted_scopes", "")).split():
+            raise ValueError("The connected email account has not granted send-only permission")
+        now = datetime.now(timezone.utc)
+        try:
+            autopilot_expiry = datetime.fromisoformat(str(self.setting("autopilot_grant_expires_at")))
+            if autopilot_expiry.tzinfo is None:
+                autopilot_expiry = autopilot_expiry.replace(tzinfo=timezone.utc)
+        except ValueError:
+            raise ValueError("The Full Autopilot grant has expired") from None
+        expires = min(now + timedelta(days=days), autopilot_expiry)
+        if expires <= now:
+            raise ValueError("The Full Autopilot grant has expired")
+        fingerprint = self._email_send_autopilot_fingerprint()
+        with self.connection:
+            self.connection.execute("UPDATE settings SET value='true' WHERE key='email_send_autopilot_authorized'")
+            self.connection.execute("UPDATE settings SET value=? WHERE key='email_send_autopilot_fingerprint'", (fingerprint,))
+            self.connection.execute("UPDATE settings SET value=? WHERE key='email_send_autopilot_expires_at'", (expires.isoformat(),))
+            self.log("email_send_autopilot_granted", f"Expires {expires.date().isoformat()}; bound to current job scope and send account")
+
+    def email_send_autopilot_authorized(self) -> bool:
+        if (
+            self.setting("email_send_autopilot_authorized") != "true"
+            or not self.autopilot_authorized()
+            or self.setting("application_mode") != "autopilot"
+            or self.setting("dry_run") != "false"
+            or self.setting("automation_paused") == "true"
+            or not self.mail_send_connection()
+        ):
+            return False
+        try:
+            expires = datetime.fromisoformat(str(self.setting("email_send_autopilot_expires_at")))
+            if expires.tzinfo is None:
+                expires = expires.replace(tzinfo=timezone.utc)
+            if expires <= datetime.now(timezone.utc):
+                return False
+        except ValueError:
+            return False
+        saved = self.setting("email_send_autopilot_fingerprint") or ""
+        return bool(saved and hmac.compare_digest(saved, self._email_send_autopilot_fingerprint()))
 
     def reserve_submission_attempt(self, application_id: int, *, daily_limit: int, package_hash: str, preparation_token: str) -> int | None:
         """Atomically reserve a daily slot and make at most one external submit attempt."""
@@ -1524,9 +1893,11 @@ class Repository:
             day = now[:10]
             allocated = int(self.connection.execute(
                 "SELECT COUNT(DISTINCT a.id) FROM applications a LEFT JOIN application_attempts t ON t.application_id=a.id "
-                "WHERE (a.status IN ('APPLIED','APPLIED_MANUAL') AND substr(a.updated_at,1,10)=?) "
-                "OR (substr(t.started_at,1,10)=? AND t.state IN ('SUBMITTING','SUBMITTED','UNKNOWN','CAPTCHA_HOLD'))",
-                (day, day),
+                "LEFT JOIN email_outbox e ON e.application_id=a.id "
+                "WHERE (a.status IN ('APPLIED','APPLIED_MANUAL','EMAIL_ACCEPTED','EMAIL_SUBMITTED_UNVERIFIED') AND substr(a.updated_at,1,10)=?) "
+                "OR (substr(t.started_at,1,10)=? AND t.state IN ('SUBMITTING','SUBMITTED','UNKNOWN','CAPTCHA_HOLD')) "
+                "OR (substr(e.started_at,1,10)=? AND e.state IN ('SENDING','ACCEPTED','UNKNOWN','FAILED_FINAL'))",
+                (day, day, day),
             ).fetchone()[0])
             if allocated >= daily_limit:
                 self.connection.rollback()

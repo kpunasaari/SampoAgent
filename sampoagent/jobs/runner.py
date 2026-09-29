@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 import re
+from collections.abc import Mapping
 from typing import Any
 
 from sampoagent.jobs.adapters import (
@@ -39,17 +40,25 @@ def _term_matches(term: str, text: str) -> bool:
     return matched >= 1 and matched / len(words) >= 0.6
 
 
+def _policy_confirmed(value: object) -> bool:
+    return value is True or value == 1 or (isinstance(value, str) and value.strip().casefold() in {"1", "true", "yes"})
+
+
 def is_relevant_job(job: Any, *, plan: SearchPlan, preferences: dict[str, object]) -> bool:
     """Keep feed/API imports tied to explicit profile terms and saved filters."""
+    def field(name: str) -> str:
+        value = job.get(name, "") if isinstance(job, Mapping) else getattr(job, name, "")
+        return str(value or "")
+
     normalized = {
-        "title": job.title,
-        "company": job.company,
-        "location": job.location,
-        "description": job.description,
+        "title": field("title"),
+        "company": field("company"),
+        "location": field("location"),
+        "description": field("description"),
     }
     if not plan.terms or not matches_preferences(job=normalized, preferences=preferences):
         return False
-    text = f"{job.title}\n{job.description}".casefold()
+    text = f"{normalized['title']}\n{normalized['company']}\n{normalized['description']}".casefold()
     return any(_term_matches(term, text) for term in plan.terms)
 
 
@@ -99,10 +108,30 @@ def run_discovery(
         max_queries=max_queries,
     )
     run_id = repository.create_discovery_run(query_count=len(plan.queries))
+    if not plan.terms:
+        summary = "Choose a target occupation or add an explicit search keyword before discovery."
+        repository.complete_discovery_run(
+            run_id,
+            status="no_search_terms",
+            jobs_found=0,
+            imported_count=0,
+            duplicates_count=0,
+            summary=summary,
+        )
+        return DiscoveryReport(run_id, plan, 0, 0, 0, "no_search_terms")
     total_found = imported = duplicates = 0
     had_error = False
     automatic_sources_checked = 0
-    for source in eligible_sources(all_sources, repository.preferences()):
+    sources = sorted(eligible_sources(all_sources, repository.preferences()), key=lambda item: int(item.get("id", 0)))
+    cursor_raw = repository.setting("discovery_source_cursor") or ""
+    try:
+        cursor = int(cursor_raw)
+    except ValueError:
+        cursor = 0
+    start_index = next((index for index, source in enumerate(sources) if int(source.get("id", 0)) > cursor), 0)
+    sources = sources[start_index:] + sources[:start_index]
+    last_automatic_source_id: int | None = None
+    for source in sources:
         source_id = int(source["id"])
         name = str(source.get("name", "Job source"))
         url = str(source.get("url", ""))
@@ -112,15 +141,25 @@ def run_discovery(
         if "browser search only" in capability.casefold():
             status = "browser_only"
             message = "Open the personalized search links; this source was not automatically fetched."
+        elif "scrapling public page" in capability.casefold() and not _policy_confirmed(source.get("terms_reviewed")):
+            status = "terms_review_required"
+            message = "Review and record the source terms-of-use URL before enabling automated public-page retrieval."
+            adapter = None
         else:
             if adapter is None and "job market finland api" in capability.casefold() and api_adapter is None:
                 try:
                     adapter = JobMarketFinlandAdapter.from_environment()
-                except SourceAdapterError as exc:
+                except SourceAdapterError:
                     status = "not_configured"
-                    message = str(exc)
+                    message = "Job Market Finland API needs official KEHA Centre activation and a configured API key."
                     had_error = True
-            if adapter is None and status != "not_configured":
+            if adapter is not None and repository.source_is_in_backoff(source_id):
+                source_state = repository.discovery_source_state(source_id) or {}
+                status = "cooldown"
+                reason = "A previous source check failed" if int(source_state.get("consecutive_failures", 0)) else "This source is within its minimum 60-second request interval"
+                message = f"{reason}; the next permitted check is {source_state.get('next_attempt_at')}."
+                adapter = None
+            if adapter is None and status not in {"not_configured", "cooldown"}:
                 status = "not_configured"
                 message = "This source needs an explicitly configured supported feed or official API adapter."
                 had_error = True
@@ -130,6 +169,7 @@ def run_discovery(
                 adapter = None
             elif adapter is not None:
                 automatic_sources_checked += 1
+                last_automatic_source_id = source_id
         if adapter is not None:
             try:
                 jobs = adapter.search(source, plan, timeout_seconds=4.0, max_bytes=2_000_000)
@@ -146,11 +186,25 @@ def run_discovery(
                         duplicates_here += 1
                     else:
                         imported_here += 1
+                        if (
+                            isinstance(adapter, JobMarketFinlandAdapter)
+                            and capability.casefold() == "job market finland api"
+                            and job.company.casefold() not in {"job market finland", "työmarkkinatori", "unknown employer"}
+                            and job.source_id == source_id
+                            and job.source_url == url
+                            and verification != "EXPIRED"
+                        ):
+                            try:
+                                repository.mark_official_api_job_verified(inserted, source_id=source_id, source_url=url)
+                            except ValueError:
+                                # Keep an incomplete or sensitive application URL
+                                # reviewable, but never auto-eligible.
+                                pass
                 status = "imported" if imported_here else ("duplicates" if duplicates_here else "no_results")
                 message = "Supported source checked successfully. Review the imported jobs before applying."
-            except (SourceAdapterError, ValueError) as exc:
+            except (SourceAdapterError, ValueError):
                 status = "failed"
-                message = str(exc)
+                message = "Source check failed. No credentials, URLs, or request details were stored."
                 had_error = True
             except Exception:
                 status = "failed"
@@ -181,4 +235,6 @@ def run_discovery(
         duplicates_count=duplicates,
         summary=summary,
     )
+    if last_automatic_source_id is not None:
+        repository.set_setting("discovery_source_cursor", str(last_automatic_source_id))
     return DiscoveryReport(run_id, plan, total_found, imported, duplicates, status)

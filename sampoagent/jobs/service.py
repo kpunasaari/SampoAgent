@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 from datetime import date
 from hashlib import sha256
+import json
+from collections.abc import Mapping
 from urllib.parse import urlsplit, urlunsplit
 import re
 
@@ -51,3 +53,11 @@ def verification_state(*, deadline: date | None, employer: str, application_url:
     if employer and application_url:
         return "PARTIALLY_VERIFIED"
     return "UNVERIFIED"
+
+
+def job_snapshot_hash(job: Mapping[str, object]) -> str:
+    """Bind verification to the exact public listing facts that were reviewed."""
+    fields = ("title", "company", "location", "language", "description", "application_url", "deadline", "source_id", "source_url")
+    snapshot = {key: job.get(key) for key in fields}
+    payload = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return sha256(payload.encode("utf-8")).hexdigest()

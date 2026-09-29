@@ -9,3 +9,6 @@ dist/
 application_data/
 uploads/
 .env
+*.sampoagent.lock
+*.sampobak
+JOB-ARCHIVE-*.md

@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from typing import Mapping, Sequence
 from urllib.parse import quote_plus, urlsplit
 
-from sampoagent.careers.recommendations import recommend_occupations
 from sampoagent.jobs.service import detect_language
 
 
@@ -86,28 +85,14 @@ def build_search_plan(
     sources: Sequence[Mapping[str, object]],
     max_queries: int = 120,
 ) -> SearchPlan:
-    """Build source-scoped web searches from confirmed candidate evidence.
+    """Build source-scoped searches only from user-activated job targets.
 
     The links open a web search scoped to each source domain. This planner does
     not visit or scrape the job source; direct indexing requires a feed or an
-    officially supported adapter.
+    officially supported adapter. Candidate skills and past experience may
+    inform recommendations, but never activate a role without user selection.
     """
     terms: list[str] = []
-    confirmed_skills: list[str] = []
-    for fact in facts:
-        if not _enabled(fact) or not _enabled({"enabled": not bool(fact.get("rejected", False))}):
-            continue
-        if fact.get("confirmed") not in (True, 1, "1", "true", "True"):
-            continue
-        value = str(fact.get("value", "")).strip()
-        if not value:
-            continue
-        fact_type = str(fact.get("type", "")).casefold()
-        if fact_type == "skill":
-            confirmed_skills.append(value)
-        elif fact_type in {"experience", "job_title", "position", "work_title"}:
-            terms.append(value)
-
     for target in targets:
         if _enabled(target):
             terms.extend(
@@ -118,13 +103,6 @@ def build_search_plan(
     for profile in career_profiles:
         if _enabled(profile) and profile.get("name"):
             terms.append(str(profile["name"]))
-    for record in candidate_records.get("experience", ()):
-        title = str(record.get("title", "")).strip()
-        if title:
-            terms.append(title)
-
-    for recommendation in recommend_occupations(confirmed_skills, ignored=[]):
-        terms.extend((recommendation.title_fi, recommendation.title_en))
 
     for key in ("keywords", "search_terms_include", "title_include", "industries", "employer_include"):
         terms.extend(_locations(preferences.get(key, "")))

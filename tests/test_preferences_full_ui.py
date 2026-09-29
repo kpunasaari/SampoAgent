@@ -39,7 +39,7 @@ def test_explicit_source_category_preference_filters_the_search_plan():
     plan = build_search_plan(
         facts=[{"type": "experience", "value": "Cleaner", "confirmed": 1, "rejected": 0}],
         candidate_records={}, targets=[], career_profiles=[],
-        preferences={"include_public_sector": "no", "include_recruitment_agencies": "no"},
+        preferences={"include_public_sector": "no", "include_recruitment_agencies": "no", "keywords": "Cleaner"},
         sources=[
             {"id": 1, "name": "Board", "url": "https://board.fi", "source_type": "job board", "enabled": 1},
             {"id": 2, "name": "City", "url": "https://city.fi", "source_type": "public-sector board", "enabled": 1},

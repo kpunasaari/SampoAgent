@@ -7,7 +7,7 @@ def test_applications_can_record_safe_submission_evidence() -> None:
     response = client.post(
         "/applications/1/evidence",
         data={
-            "final_url": "https://example.test/thanks",
+            "final_url": "https://careers.northstar-logistics.fi/thanks",
             "confirmation_message": "Application received",
             "confirmation_id": "ABC-1",
         },

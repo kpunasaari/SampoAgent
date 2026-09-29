@@ -59,6 +59,16 @@ def test_source_ui_adds_edits_toggles_and_removes_sources(tmp_path):
     assert "Remove source" in page.text
     assert "Scrapling public page" in page.text
     assert "Job card CSS selector" in page.text
+    assert "Public-page terms review" in page.text
+
+    policy = client.post(
+        f"/sources/{source_id}/terms",
+        data={"terms_url": "https://example.org/terms", "terms_reviewed": "yes"},
+        follow_redirects=False,
+    )
+    assert policy.status_code == 303
+    assert app.state.repository.source(source_id)["terms_reviewed"] == 1
+    assert "terms_reviewed_at" in app.state.repository.source(source_id)
 
     update = client.post(f"/sources/{source_id}/edit", data={"name": "Updated", "url": "https://example.org/feed.xml", "country": "Finland", "source_type": "job board", "capability": "JSON Feed", "listing_selector": "article.position", "notes": "JSON feed"}, follow_redirects=False)
     assert update.status_code == 303
@@ -69,3 +79,78 @@ def test_source_ui_adds_edits_toggles_and_removes_sources(tmp_path):
     assert app.state.repository.source(source_id)["enabled"] == 0
     client.post(f"/sources/{source_id}/delete")
     assert app.state.repository.source(source_id) is None
+
+
+def test_public_page_source_requires_recorded_terms_review_before_automatic_fetch(tmp_path):
+    from sampoagent.jobs.runner import run_discovery
+
+    repository = Repository(tmp_path / "terms-review.db")
+    repository.initialize()
+    repository.save_profile("Synthetic User", "en")
+    repository.add_target_occupation("Cleaner", "Siivooja")
+    source_id = repository.add_source(
+        name="Public careers",
+        url="https://jobs.example.org/careers",
+        country="Finland",
+        source_type="employer career site",
+        capability="Scrapling public page",
+    )
+
+    class CountingAdapter:
+        calls = 0
+
+        def search(self, *_args, **_kwargs):
+            self.calls += 1
+            return []
+
+    adapter = CountingAdapter()
+    first = run_discovery(repository, scrapling_adapter=adapter)
+    first_result = next(row for row in repository.discovery_source_results(first.run_id) if row["source_id"] == source_id)
+    assert first_result["status"] == "terms_review_required"
+    assert adapter.calls == 0
+
+    repository.update_source(
+        source_id,
+        name="Public careers",
+        url="https://jobs.example.org/careers",
+        country="Finland",
+        source_type="employer career site",
+        notes="Public listings only",
+        capability="Scrapling public page",
+        terms_url="https://jobs.example.org/terms",
+        terms_reviewed=True,
+    )
+    assert repository.source(source_id)["terms_reviewed"] == 1
+    assert repository.source(source_id)["terms_url"] == "https://jobs.example.org/terms"
+    second = run_discovery(repository, scrapling_adapter=adapter)
+    second_result = next(row for row in repository.discovery_source_results(second.run_id) if row["source_id"] == source_id)
+    assert second_result["status"] == "no_results"
+    assert adapter.calls == 1
+
+    repository.update_source(
+        source_id,
+        name="Public careers",
+        url="https://new.jobs.example.org/careers",
+        country="Finland",
+        source_type="employer career site",
+        notes="Public listings only",
+        capability="Scrapling public page",
+        terms_url="https://jobs.example.org/terms",
+        terms_reviewed=True,
+    )
+    assert repository.source(source_id)["terms_reviewed"] == 0
+
+
+def test_scrapling_terms_review_requires_public_https_terms_url():
+    repository = Repository(":memory:")
+    repository.initialize()
+    with pytest.raises(ValueError, match="(?i)terms.*HTTPS|HTTPS.*terms"):
+        repository.add_source(
+            name="Public careers",
+            url="https://jobs.example.org/careers",
+            country="Finland",
+            source_type="employer career site",
+            capability="Scrapling public page",
+            terms_url="http://jobs.example.org/terms",
+            terms_reviewed=True,
+        )

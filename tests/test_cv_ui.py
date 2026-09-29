@@ -25,9 +25,11 @@ def test_cv_page_uses_safe_filename_pattern_and_exposes_download() -> None:
         follow_redirects=True,
     )
 
-    assert "Aino_Example_warehouse_logistics_en.pdf" in response.text
-    assert "/cvs/generated/Aino_Example_warehouse_logistics_en.pdf" in response.text
+    import re
+    generated = re.search(r"Aino_Example_warehouse_logistics_en_[a-f0-9]{8}\.pdf", response.text)
+    assert generated
+    assert f"/cvs/generated/{generated.group(0)}" in response.text
 
-    download = client.get("/cvs/generated/Aino_Example_warehouse_logistics_en.pdf")
+    download = client.get(f"/cvs/generated/{generated.group(0)}")
     assert download.status_code == 200
     assert download.headers["content-type"].startswith("application/pdf")

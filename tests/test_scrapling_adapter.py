@@ -124,7 +124,8 @@ def test_discovery_runner_dispatches_scrapling_sources_and_imports_only_normaliz
     repository.initialize()
     repository.save_profile("Kai", "en")
     repository.add_confirmed_fact(fact_type="experience", value="Cleaner")
-    source_id = repository.add_source(name="Public careers", url="https://jobs.example.org/careers", country="Finland", source_type="employer career site", capability="Scrapling public page")
+    repository.add_target_occupation("Cleaner", "Siivooja")
+    source_id = repository.add_source(name="Public careers", url="https://jobs.example.org/careers", country="Finland", source_type="employer career site", capability="Scrapling public page", terms_url="https://jobs.example.org/terms", terms_reviewed=True)
     adapter = ScraplingAdapter(fetcher=lambda *_: b"<html><script type='application/ld+json'>{}</script></html>", selector_factory=_JsonLdPage)
 
     report = run_discovery(repository, scrapling_adapter=adapter)

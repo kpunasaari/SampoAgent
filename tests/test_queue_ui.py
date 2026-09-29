@@ -58,7 +58,7 @@ def test_queue_refuses_duplicate_application_record() -> None:
 
     assert "Application prepared for review" in first.text
     assert "This job already has an application record." in second.text
-    assert second.text.count("<td>READY</td>") == 1
+    assert second.text.count("<td>READY<br>QUEUED</td>") == 1
 
 
 def test_daily_limit_prevents_manual_applied_status() -> None:

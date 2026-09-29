@@ -24,7 +24,7 @@ def test_search_plan_uses_confirmed_profile_targets_and_locations() -> None:
 
     assert "Warehouse Worker" in plan.terms
     assert "Varastotyöntekijä" in plan.terms
-    assert "Night-shift packer" in plan.terms
+    assert "Night-shift packer" not in plan.terms
     assert "Customer Service" in plan.terms
     assert "Nurse" not in plan.terms
     assert "Cooking" not in plan.terms

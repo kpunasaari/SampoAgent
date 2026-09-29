@@ -47,3 +47,50 @@ def test_cv_includes_structured_experience_and_education_in_ats_text(tmp_path: P
 
     report = validate_ats_pdf(path, required=["Service Assistant", "2023-01", "Vocational qualification", "Customer service"])
     assert report.passed is True
+
+
+def test_job_tailored_cv_prioritizes_confirmed_skills_relevant_to_the_vacancy(tmp_path: Path) -> None:
+    from sampoagent.cv.service import generate_cv_pdf, validate_ats_pdf
+
+    path = generate_cv_pdf(
+        output_dir=tmp_path,
+        language="en",
+        role_family="cleaning_facilities",
+        candidate={"name": "Aino Example", "email": "aino@example.test"},
+        facts=[
+            {"type": "skill", "value": "Time management", "confirmed": True},
+            {"type": "skill", "value": "School cleaning", "confirmed": True},
+            {"type": "skill", "value": "Customer service", "confirmed": True},
+        ],
+        target_title="School Cleaner",
+        priority_terms=["School Cleaner", "School cleaning"],
+    )
+
+    report = validate_ats_pdf(path, required=["School cleaning", "Time management", "Customer service"])
+
+    assert report.passed
+    assert report.text.index("School cleaning") < report.text.index("Time management")
+
+
+def test_cv_pdf_wraps_and_paginates_long_confirmed_work_history(tmp_path: Path) -> None:
+    from pypdf import PdfReader
+    from sampoagent.cv.service import generate_cv_pdf, validate_ats_pdf
+
+    experience = [
+        {"title": f"Confirmed role {index:02d}", "details": "School cleaning and customer service. " * 9}
+        for index in range(1, 25)
+    ]
+    path = generate_cv_pdf(
+        output_dir=tmp_path,
+        language="en",
+        role_family="cleaning_facilities",
+        candidate={"name": "Aino Example", "email": "aino@example.test"},
+        facts=[{"type": "skill", "value": "School cleaning", "confirmed": True}],
+        records={"experience": experience},
+    )
+
+    report = validate_ats_pdf(path, required=[item["title"] for item in experience])
+
+    assert report.passed
+    assert len(PdfReader(str(path)).pages) >= 2
+    assert "Confirmed role 24" in report.text

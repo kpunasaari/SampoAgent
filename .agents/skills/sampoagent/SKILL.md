@@ -37,6 +37,10 @@ Help the user find suitable openings and prepare accurate applications while kee
 
 Record only useful, non-secret status and evidence, such as found, selected, draft ready, submitted, confirmation reference, and follow-up date. Never store passwords, access tokens, or unnecessary sensitive answers. Preserve application history and distinguish a prepared draft from a verified submission.
 
+When the user asks for a SampoAgent outcome retrospective, inspect the local learning summary only if the SampoAgent Settings page explicitly shows Codex learning-summary sharing enabled. In this repository, run `py -m sampoagent learning-summary --database sampoagent.db` from the project root only when that is the active app database; if the current app was explicitly started with another database path, pass that exact path instead. The command is read-only and independently enforces consent. Do not search for other databases, query SQLite tables directly, or try to work around disabled consent or a missing database. The summary contains only role-family/CV-language aggregate groups with at least five candidate-confirmed outcomes; it excludes candidate facts, CV contents, direct identifiers, employer/job title/location, free text, paths, and checksums.
+
+Use the available aggregate only to explain modest, observed role-family and CV-selection signals; it may break ties among already-qualified options, never override job requirements or alter candidate facts. Do not treat an application receipt/submission, CAPTCHA hold, unknown result, or unconfirmed silence as hiring feedback. Keep the retrospective inside the active SampoAgent task; do not launch a detached Codex task or automation unless the user explicitly authorizes that integration. If consent is off or the exact active database is unavailable, say the retrospective is unavailable and continue using confirmed candidate facts and job requirements only.
+
 ## SampoAgent focused skills
 
 When present in the repository, load only the focused workflow needed:

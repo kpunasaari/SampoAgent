@@ -205,3 +205,9 @@ For job-search and application tasks in this repository, use `.agents/skills/sam
 
 - The CAPTCHA queue records only the user's selected outcome and fixed generic confirmation evidence. It no longer solicits or stores pasted employer-page text, which could contain candidate identifiers or other personal information. CAPTCHA submission receipts still have no invented confirmation URL or reference ID.
 - Test-first regression demonstrated both the unnecessary free-text field and PII retention in timeline/evidence; both are removed. Full local suite and release gates are recorded in the implementation plan. This does not imply employer staging or live submission validation.
+
+## Confirmed profile preferences in matching — 2026-09-30
+
+- Current confirmed global answers can supply only supported blank/Any search filters: simple location lists, exact work setting, contract type, and weekly hours. Explicit Settings values win; ambiguous prose, employer-scoped availability/pay, and preferred occupations do not become global filters or activate search targets.
+- One shared effective-preference snapshot is used by search planning/source filtering, discovered and existing job matching, CV queue preparation, and final web/email Autopilot scope checks. The Settings and guided-review pages disclose active profile fallbacks and allow disabling them. Radius remains saved but unapplied until a reliable distance source exists.
+- Synthetic repository, matcher, Jobs UI, Settings, onboarding-review, discovery and automation checks are recorded in `docs/superpowers/plans/2026-09-29-full-application-automation.md`. No candidate database, employer, OAuth account or live application was accessed. Employer-controlled ATS staging, OS-level egress/fallback proof, supervised privacy review and pilot remain release gates.

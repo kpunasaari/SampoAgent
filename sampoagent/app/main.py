@@ -645,7 +645,7 @@ def create_app(
 
     @app.get("/jobs", response_class=HTMLResponse)
     def jobs(notice: str = Query(default="")) -> HTMLResponse:
-        job_rows = [job for job in repository.rows("jobs") if matches_preferences(job=job, preferences=repository.preferences())]
+        job_rows = [job for job in repository.rows("jobs") if matches_preferences(job=job, preferences=repository.effective_search_preferences())]
         from sampoagent.applications.runner import _active_verified_job
 
         def job_row(job: dict[str, object]) -> str:
@@ -717,7 +717,7 @@ def create_app(
             candidate_records={kind: repository.candidate_records(kind) for kind in record_types},
             targets=repository.target_occupations(),
             career_profiles=repository.rows("career_profiles"),
-            preferences=repository.preferences(),
+            preferences=repository.effective_search_preferences(),
             sources=repository.rows("job_sources"),
         )
 
@@ -1385,6 +1385,23 @@ def create_app(
         csrf = str(app.state.local_action_token)
         configs = load_configs(repository.setting("scoring_config"))
         preferences = repository.preferences()
+        effective_preferences = repository.effective_search_preferences()
+        profile_preference_use = repository.setting("use_profile_preferences") != "false"
+        fallback_labels = {
+            "locations": "Preferred locations",
+            "work_type": "Work setting",
+            "employment_type": "Contract type",
+            "hours_type": "Weekly hours",
+        }
+        display_preferences = dict(preferences)
+        if display_preferences.get("employment_type") in {"full_time", "part_time"} and display_preferences.get("hours_type", "any") == "any":
+            display_preferences["hours_type"] = str(display_preferences["employment_type"])
+            display_preferences["employment_type"] = "any"
+        active_profile_fallbacks = ", ".join(
+            f"{label}: {str(effective_preferences.get(key, '' if key == 'locations' else 'any'))}"
+            for key, label in fallback_labels.items()
+            if effective_preferences.get(key, "" if key == "locations" else "any") != preferences.get(key, "" if key == "locations" else "any")
+        )
         application_mode = repository.setting("application_mode") or "review_everything"
         ai_usage_mode = repository.setting("ai_usage_mode") or "minimal"
         work_type = str(preferences.get("work_type", "any"))
@@ -1392,13 +1409,20 @@ def create_app(
             f"<fieldset><legend>{name.replace('_', ' ').title()}</legend><label>Enabled <select name='{name}_enabled'><option value='yes'{' selected' if config.enabled else ''}>Yes</option><option value='no'{' selected' if not config.enabled else ''}>No</option></select></label> <label>{name.replace('_', ' ').title()} weight <input name='{name}_weight' type='number' min='0' max='100' value='{config.weight:g}' required></label> <label>{name.replace('_', ' ').title()} minimum <input name='{name}_minimum' type='number' min='0' max='100' value='{config.minimum:g}' required></label></fieldset>"
             for name, config in configs.items()
         )
-        select_options = lambda key, choices, default: "".join(f"<option value='{value}'{' selected' if str(preferences.get(key, default)) == value else ''}>{label}</option>" for value, label in choices)
+        select_options = lambda key, choices, default: "".join(f"<option value='{value}'{' selected' if str(display_preferences.get(key, default)) == value else ''}>{label}</option>" for value, label in choices)
+        profile_preference_choice = "yes" if profile_preference_use else "no"
+        profile_preference_options = "".join(
+            f"<option value='{value}'{' selected' if profile_preference_choice == value else ''}>{label}</option>"
+            for value, label in (("yes", "Yes · use clear profile answers"), ("no", "No · use Settings only"))
+        )
         prefs_fields = (
             f"<label>Preferred locations <input name='locations' value='{escape(str(preferences.get('locations', '')))}' placeholder='Helsinki, Vantaa'></label>"
             f"<label>Exclude locations <input name='locations_exclude' value='{escape(str(preferences.get('locations_exclude', '')))}' placeholder='Tampere'></label>"
             f"<label>Work setting <select name='work_type'>{select_options('work_type', [('any','Any'),('onsite','On-site'),('hybrid','Hybrid'),('remote','Remote')], 'any')}</select></label>"
-            f"<label>Employment type <select name='employment_type'>{select_options('employment_type', [('any','Any'),('full_time','Full-time'),('part_time','Part-time'),('temporary','Temporary'),('seasonal','Seasonal')], 'any')}</select></label>"
+            f"<label>Contract type <select name='employment_type'>{select_options('employment_type', [('any','Any'),('permanent','Permanent'),('temporary','Fixed-term / temporary'),('seasonal','Seasonal')], 'any')}</select></label>"
+            f"<label>Weekly hours <select name='hours_type'>{select_options('hours_type', [('any','Any'),('full_time','Full-time'),('part_time','Part-time')], 'any')}</select></label>"
             f"<label>Preferred shift <select name='schedule'>{select_options('schedule', [('any','Any'),('day','Day'),('evening','Evening'),('night','Night'),('weekend','Weekend')], 'any')}</select></label>"
+            f"<label>Use confirmed questionnaire preferences when these filters are unrestricted? <select name='use_profile_preferences'>{profile_preference_options}</select></label>"
             f"<label>Job keywords <input name='keywords' value='{escape(str(preferences.get('keywords', '')))}'></label>"
             f"<label>Search phrases to include <input name='search_terms_include' value='{escape(str(preferences.get('search_terms_include', '')))}'></label>"
             f"<label>Search phrases to exclude <input name='search_terms_exclude' value='{escape(str(preferences.get('search_terms_exclude', '')))}'></label>"
@@ -1428,7 +1452,7 @@ def create_app(
             if not email_send_connection else
             "Optional separate grant: Full Autopilot may create and send an encrypted application package only when the current verified posting contains an explicit email-application instruction with exactly one nearby address. It is limited to the selected default sender, same roles, sources, preferences and daily cap, expires with the 30-day Autopilot grant, and never sends follow-ups or accepts offers. Missing/ambiguous addresses, unsupported languages, facts, CVs or permissions hold that job without browser fallback. Revoke by unchecking this box, pausing automation, changing scope, or changing/disconnecting the selected account."
         )
-        form = f"<form class='settings-form' method='post' action='/settings'><div class='settings-group'><h3>Application controls</h3><div class='settings-fields'><label>Application mode <select name='application_mode'><option value='review_everything'{' selected' if application_mode == 'review_everything' else ''}>Review Everything</option><option value='smart_approval'{' selected' if application_mode == 'smart_approval' else ''}>Smart Approval · review each exact package</option><option value='autopilot'{' selected' if application_mode == 'autopilot' else ''}>Full Autopilot · no per-job prompts</option></select></label><label>Daily application limit <input name='daily_limit' type='number' min='0' value='{escape(repository.setting('daily_limit') or '0')}'></label><label>Dry Run <select name='dry_run'><option value='true'{' selected' if dry_run else ''}>On · prepare only, no final submission</option><option value='false'{' selected' if not dry_run else ''}>Off · allow authorized external submissions</option></select></label><label>Emergency stop <select name='automation_paused'><option value='false'{' selected' if not paused else ''}>Running when worker is started</option><option value='true'{' selected' if paused else ''}>Paused · block new submissions</option></select></label><label>AI usage <select name='ai_usage_mode'><option value='minimal'{' selected' if ai_usage_mode == 'minimal' else ''}>Minimal</option><option value='balanced'{' selected' if ai_usage_mode == 'balanced' else ''}>Balanced</option><option value='quality'{' selected' if ai_usage_mode == 'quality' else ''}>Quality</option></select></label></div><p>Smart Approval shows the complete answers and CV checksum, then waits for approval of that exact package. Full Autopilot can submit within the separate 30-day grant, saved job preferences, and daily limit.</p><p>Next/Continue steps may save candidate information page by page; if a later page needs review, earlier entries may already be saved. Smart Approval and Dry Run stop before entering candidate data on multi-step forms.</p><label><input type='checkbox' name='autopilot_ack' value='yes'{' checked' if autopilot_authorized else ''}> I authorize Full Autopilot to submit eligible applications without per-job prompts for 30 days, within the saved preferences and daily limit, using confirmed information. Next/Continue steps may save candidate information page by page.</label><p>CAPTCHA, sign-in, unknown or conflicting required answers, high-risk/legal declarations, expired/unverified listings, and unsupported forms always wait for you. Changing candidate facts, answers, role/source preferences or the daily limit invalidates this grant. The localhost app manages its worker while open; install the optional browser extra and Chromium for form handling.</p><p>Availability: automation runs only while your machine, the app and your interactive user session are available. Existing queued work resumes on the next polling cycle after wake or network recovery, after authorization is checked again; discovery still follows source cooldowns. Uncertain submit or email attempts are never retried. SampoAgent does not install an operating-system login startup task.</p><h3>Separate email-send Autopilot</h3><p>{email_send_scope_copy}</p><label><input type='checkbox' name='email_send_autopilot_ack' value='yes'{' checked' if email_send_autopilot_authorized else ''}{send_email_ack_disabled}> I separately authorize automatic sending of eligible email application packages when the current verified posting explicitly gives one unambiguous application address, for up to 30 days. Ambiguous/missing address, sender, facts, CV or consent holds that job; no per-job browser/email fallback is attempted.</label></div><div class='settings-group'><h3>Scanned CV OCR</h3><p>OCR is optional and runs locally. OCR-derived text remains unconfirmed and retains its PDF page evidence. If no provider is available, SampoAgent will stop and ask you to use text entry.</p><label>OCR provider <select name='ocr_provider'>{ocr_options}</select></label></div><div class='settings-group'><h3>Job preferences &amp; search</h3><p>Comma-separated values are treated as alternatives. The salary floor excludes a listing only when its explicit monthly EUR maximum is below it; unstated, hourly, annual, non-EUR, or ambiguous pay remains visible as uncomparable. Radius is saved for future distance-aware matching; missing posting locations are not guessed.</p><div class='settings-fields'>{prefs_fields}</div></div><div class='settings-group'><h3>Explainable scoring configuration</h3><p>Enabled dimensions are reweighted automatically. A job must meet every enabled minimum.</p><div class='settings-fields'>{score_inputs}</div></div><button>Save settings</button></form>"
+        form = f"<form class='settings-form' method='post' action='/settings'><div class='settings-group'><h3>Application controls</h3><div class='settings-fields'><label>Application mode <select name='application_mode'><option value='review_everything'{' selected' if application_mode == 'review_everything' else ''}>Review Everything</option><option value='smart_approval'{' selected' if application_mode == 'smart_approval' else ''}>Smart Approval · review each exact package</option><option value='autopilot'{' selected' if application_mode == 'autopilot' else ''}>Full Autopilot · no per-job prompts</option></select></label><label>Daily application limit <input name='daily_limit' type='number' min='0' value='{escape(repository.setting('daily_limit') or '0')}'></label><label>Dry Run <select name='dry_run'><option value='true'{' selected' if dry_run else ''}>On · prepare only, no final submission</option><option value='false'{' selected' if not dry_run else ''}>Off · allow authorized external submissions</option></select></label><label>Emergency stop <select name='automation_paused'><option value='false'{' selected' if not paused else ''}>Running when worker is started</option><option value='true'{' selected' if paused else ''}>Paused · block new submissions</option></select></label><label>AI usage <select name='ai_usage_mode'><option value='minimal'{' selected' if ai_usage_mode == 'minimal' else ''}>Minimal</option><option value='balanced'{' selected' if ai_usage_mode == 'balanced' else ''}>Balanced</option><option value='quality'{' selected' if ai_usage_mode == 'quality' else ''}>Quality</option></select></label></div><p>Smart Approval shows the complete answers and CV checksum, then waits for approval of that exact package. Full Autopilot can submit within the separate 30-day grant, saved job preferences, and daily limit.</p><p>Next/Continue steps may save candidate information page by page; if a later page needs review, earlier entries may already be saved. Smart Approval and Dry Run stop before entering candidate data on multi-step forms.</p><label><input type='checkbox' name='autopilot_ack' value='yes'{' checked' if autopilot_authorized else ''}> I authorize Full Autopilot to submit eligible applications without per-job prompts for 30 days, within the saved preferences and daily limit, using confirmed information. Next/Continue steps may save candidate information page by page.</label><p>CAPTCHA, sign-in, unknown or conflicting required answers, high-risk/legal declarations, expired/unverified listings, and unsupported forms always wait for you. Changing candidate facts, answers, role/source preferences or the daily limit invalidates this grant. The localhost app manages its worker while open; install the optional browser extra and Chromium for form handling.</p><p>Availability: automation runs only while your machine, the app and your interactive user session are available. Existing queued work resumes on the next polling cycle after wake or network recovery, after authorization is checked again; discovery still follows source cooldowns. Uncertain submit or email attempts are never retried. SampoAgent does not install an operating-system login startup task.</p><h3>Separate email-send Autopilot</h3><p>{email_send_scope_copy}</p><label><input type='checkbox' name='email_send_autopilot_ack' value='yes'{' checked' if email_send_autopilot_authorized else ''}{send_email_ack_disabled}> I separately authorize automatic sending of eligible email application packages when the current verified posting explicitly gives one unambiguous application address, for up to 30 days. Ambiguous/missing address, sender, facts, CV or consent holds that job; no per-job browser/email fallback is attempted.</label></div><div class='settings-group'><h3>Scanned CV OCR</h3><p>OCR is optional and runs locally. OCR-derived text remains unconfirmed and retains its PDF page evidence. If no provider is available, SampoAgent will stop and ask you to use text entry.</p><label>OCR provider <select name='ocr_provider'>{ocr_options}</select></label></div><div class='settings-group'><h3>Job preferences &amp; search</h3><p>Comma-separated values are treated as alternatives. Clear, current, confirmed global questionnaire answers can fill blank locations or Any work/contract/hours filters; Settings values always win. Ambiguous answers, target roles, employer-specific salary and shifts are not promoted into search filters. Radius is saved for future distance-aware matching; missing posting locations are not guessed. Current profile-derived filters: {escape(active_profile_fallbacks or 'none')}.</p><div class='settings-fields'>{prefs_fields}</div></div><div class='settings-group'><h3>Explainable scoring configuration</h3><p>Enabled dimensions are reweighted automatically. A job must meet every enabled minimum.</p><div class='settings-fields'>{score_inputs}</div></div><button>Save settings</button></form>"
         disabled = ", ".join(f"{name.replace('_', ' ').title()} is disabled" for name, config in configs.items() if not config.enabled) or "No disabled dimensions"
         cache_form = "<form method='post' action='/settings/cache/clear'><button>Clear semantic cache</button></form>"
         message = f"<p class='notice' role='status'>{escape(notice)}</p>" if notice else ""
@@ -1458,7 +1482,11 @@ def create_app(
             "<label>Type REDACT to permanently replace older detail text <input name='confirmation' autocomplete='off' required></label>"
             f"<button class='danger'{ ' disabled' if activity_details_count == 0 else ''}>Redact {activity_details_count} older activity details</button></form></section>"
         )
-        response = _page("Settings", f"<section><p>Application mode: {escape(repository.setting('application_mode') or 'review_everything')}</p><p>Daily application limit: {escape(repository.setting('daily_limit') or '0')}</p><p>AI usage mode: {escape(repository.setting('ai_usage_mode') or 'minimal')}</p><p>Preferred locations: {escape(str(preferences.get('locations', 'Any')))}</p><p>Work type: {escape(str(preferences.get('work_type', 'any')))}</p><p>Minimum monthly salary: {escape(str(preferences.get('salary_minimum', 0)))}</p><p>{escape(disabled)}</p>{message}{form}{learning_sharing_form}{data_lifecycle}{activity_cleanup_form}<h3>Local data control</h3><p>Clears cached semantic interpretations only; it does not delete your profile, jobs, applications, or source documents.</p>{cache_form}</section>")
+        fallback_notice = (
+            f"Confirmed onboarding answers currently fill unrestricted filters: {active_profile_fallbacks}."
+            if active_profile_fallbacks else "No confirmed onboarding answers are filling unrestricted filters."
+        )
+        response = _page("Settings", f"<section><p>Application mode: {escape(repository.setting('application_mode') or 'review_everything')}</p><p>Daily application limit: {escape(repository.setting('daily_limit') or '0')}</p><p>AI usage mode: {escape(repository.setting('ai_usage_mode') or 'minimal')}</p><p>Effective preferred locations: {escape(str(effective_preferences.get('locations', 'Any')))}</p><p>Effective work type: {escape(str(effective_preferences.get('work_type', 'any')))}</p><p>Minimum monthly salary: {escape(str(preferences.get('salary_minimum', 0)))}</p><p>{escape(disabled)}</p><p>{fallback_notice}</p>{message}{form}{learning_sharing_form}{data_lifecycle}{activity_cleanup_form}<h3>Local data control</h3><p>Clears cached semantic interpretations only; it does not delete your profile, jobs, applications, or source documents.</p>{cache_form}</section>")
         _set_local_form_cookie(response, app)
         return response
 
@@ -1536,6 +1564,8 @@ def create_app(
         confidence_minimum: float = Form(40),
         locations: str = Form(""),
         work_type: str = Form("any"),
+        hours_type: str = Form("any"),
+        use_profile_preferences: str = Form("yes"),
         keywords: str = Form(""),
         salary_minimum: int = Form(0),
         locations_exclude: str = Form(""),
@@ -1556,7 +1586,7 @@ def create_app(
         email_send_autopilot_ack: str = Form("no"),
         automation_paused: str = Form("false"),
     ) -> RedirectResponse:
-        if application_mode not in {"review_everything", "smart_approval", "autopilot"} or ai_usage_mode not in {"minimal", "balanced", "quality"} or ocr_provider not in {"environment", "none", "tesseract"} or dry_run not in {"true", "false"} or autopilot_ack not in {"yes", "no"} or email_send_autopilot_ack not in {"yes", "no"} or automation_paused not in {"true", "false"} or work_type not in {"any", "onsite", "hybrid", "remote"} or employment_type not in {"any", "full_time", "part_time", "temporary", "seasonal"} or schedule not in {"any", "day", "evening", "night", "weekend"} or include_public_sector not in {"yes", "no"} or include_recruitment_agencies not in {"yes", "no"} or daily_limit < 0 or salary_minimum < 0 or not 0 <= radius_km <= 500:
+        if application_mode not in {"review_everything", "smart_approval", "autopilot"} or ai_usage_mode not in {"minimal", "balanced", "quality"} or ocr_provider not in {"environment", "none", "tesseract"} or dry_run not in {"true", "false"} or autopilot_ack not in {"yes", "no"} or email_send_autopilot_ack not in {"yes", "no"} or automation_paused not in {"true", "false"} or work_type not in {"any", "onsite", "hybrid", "remote"} or employment_type not in {"any", "full_time", "part_time", "permanent", "temporary", "seasonal"} or hours_type not in {"any", "full_time", "part_time"} or use_profile_preferences not in {"yes", "no"} or schedule not in {"any", "day", "evening", "night", "weekend"} or include_public_sector not in {"yes", "no"} or include_recruitment_agencies not in {"yes", "no"} or daily_limit < 0 or salary_minimum < 0 or not 0 <= radius_km <= 500:
             return RedirectResponse("/settings?notice=" + quote("Check the application and search preference values; nothing was changed."), status_code=303)
         raw_dimensions = {
             "eligibility": (eligibility_enabled, eligibility_weight, eligibility_minimum),
@@ -1579,7 +1609,7 @@ def create_app(
         repository.set_setting("scoring_config", dump_configs(configs))
         repository.save_preferences({
             "locations": locations.strip(), "locations_exclude": locations_exclude.strip(),
-            "work_type": work_type, "employment_type": employment_type, "schedule": schedule,
+            "work_type": work_type, "employment_type": employment_type, "hours_type": hours_type, "schedule": schedule,
             "keywords": keywords.strip(), "search_terms_include": search_terms_include.strip(),
             "search_terms_exclude": search_terms_exclude.strip(), "title_include": title_include.strip(),
             "title_exclude": title_exclude.strip(), "industries": industries.strip(),
@@ -1587,6 +1617,7 @@ def create_app(
             "salary_minimum": salary_minimum, "radius_km": radius_km,
             "include_public_sector": include_public_sector, "include_recruitment_agencies": include_recruitment_agencies,
         })
+        repository.set_setting("use_profile_preferences", "true" if use_profile_preferences == "yes" else "false")
         full_auto_requested = application_mode == "autopilot" and autopilot_ack == "yes"
         live_mode_requested = application_mode == "smart_approval" or full_auto_requested
         email_send_notice = ""

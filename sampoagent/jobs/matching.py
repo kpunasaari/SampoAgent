@@ -1,8 +1,128 @@
 """Exact, explainable candidate-to-requirement checks."""
 
 from collections.abc import Mapping
+from datetime import date
+import re
 
 from sampoagent.jobs.salary import parse_monthly_eur_salary
+
+
+_PROFILE_LOCATION_CONNECTORS = {
+    "and", "or", "near", "around", "except", "excluding", "any", "anywhere", "everywhere", "all",
+    "no", "none", "preference", "flexible", "open", "relocate", "relocation",
+    "move", "willing", "would", "like", "prefer", "preferred", "work", "in", "at", "to",
+    "ja", "tai", "paitsi", "lukuun", "muuttaa", "muutto", "haluan", "toivon", "työskennellä",
+    "ei", "kaikkialla", "utom", "eller", "och", "nära", "flytta", "flytt", "vill", "önskar",
+}
+
+
+def _normalized_words(value: str) -> str:
+    return " ".join(re.findall(r"[^\W_]+", value.casefold(), flags=re.UNICODE))
+
+
+def _profile_location_list(value: object) -> str:
+    if not isinstance(value, str) or not value.strip() or len(value) > 500:
+        return ""
+    parts = re.split(r"[,;\n]+", value)
+    clean: list[str] = []
+    for part in parts:
+        item = " ".join(part.split()).strip()
+        words = _normalized_words(item).split()
+        if (
+            not item
+            or len(item) > 60
+            or not 1 <= len(words) <= 4
+            or not re.fullmatch(r"[\w .'-]+", item, flags=re.UNICODE)
+            or _PROFILE_LOCATION_CONNECTORS.intersection(words)
+        ):
+            return ""
+        clean.append(item)
+    return ", ".join(dict.fromkeys(clean))
+
+
+def _exact_choice(value: object, choices: Mapping[str, str]) -> str | None:
+    if not isinstance(value, str):
+        return None
+    return choices.get(_normalized_words(value))
+
+
+def merge_confirmed_profile_preferences(
+    saved: Mapping[str, object],
+    answers: list[Mapping[str, object]],
+    *,
+    today: date | None = None,
+) -> dict[str, object]:
+    """Use only current, confirmed, global profile preferences as safe fallbacks.
+
+    Explicit Settings filters win. Free-text answers are used only when their
+    meaning is an exact supported choice or a simple location list; role
+    interests and employer-scoped availability never create global search scope.
+    """
+    effective = dict(saved)
+    now = today or date.today()
+    eligible: dict[str, str] = {}
+    for answer in answers:
+        question_id = str(answer.get("question_id", ""))
+        if (
+            question_id not in {
+                "preferences:locations", "preferences:workplace",
+                "preferences:contract", "preferences:hours",
+            }
+            or question_id in eligible
+            or answer.get("answer_state") != "CONFIRMED"
+            or answer.get("scope_type") != "GLOBAL"
+        ):
+            continue
+        valid_until = answer.get("valid_until")
+        if valid_until:
+            try:
+                if date.fromisoformat(str(valid_until)) < now:
+                    continue
+            except ValueError:
+                continue
+        value = answer.get("value")
+        if isinstance(value, str) and value.strip():
+            eligible[question_id] = value.strip()
+
+    if not str(effective.get("locations", "") or "").strip() and "preferences:locations" in eligible:
+        locations = _profile_location_list(eligible["preferences:locations"])
+        if locations:
+            effective["locations"] = locations
+
+    any_value = {"", "any"}
+    if str(effective.get("work_type", "any") or "any").strip().casefold() in any_value:
+        work_type = _exact_choice(eligible.get("preferences:workplace"), {
+            "on site": "onsite", "onsite": "onsite", "in person": "onsite", "on premises": "onsite",
+            "paikan päällä": "onsite", "lähityö": "onsite", "på plats": "onsite", "på arbetsplatsen": "onsite",
+            "hybrid": "hybrid", "hybrid work": "hybrid", "hybridityö": "hybrid", "hybridarbete": "hybrid",
+            "remote": "remote", "remote work": "remote", "work from home": "remote", "etätyö": "remote",
+            "distansarbete": "remote",
+        })
+        if work_type:
+            effective["work_type"] = work_type
+
+    if str(effective.get("employment_type", "any") or "any").strip().casefold() in any_value:
+        employment_type = _exact_choice(eligible.get("preferences:contract"), {
+            "permanent": "permanent", "permanent employment": "permanent", "indefinite": "permanent",
+            "toistaiseksi": "permanent", "toistaiseksi voimassa oleva": "permanent", "vakituinen": "permanent",
+            "tillsvidare": "permanent", "tillsvidareanställning": "permanent",
+            "temporary": "temporary", "fixed term": "temporary", "määräaikainen": "temporary",
+            "tillfällig": "temporary", "visstidsanställning": "temporary",
+            "seasonal": "seasonal", "summer job": "seasonal", "kesätyö": "seasonal",
+            "kausityö": "seasonal", "säsongsarbete": "seasonal",
+        })
+        if employment_type:
+            effective["employment_type"] = employment_type
+
+    if str(effective.get("hours_type", "any") or "any").strip().casefold() in any_value:
+        hours_type = _exact_choice(eligible.get("preferences:hours"), {
+            "full time": "full_time", "kokoaikainen": "full_time", "kokopäiväinen": "full_time",
+            "heltid": "full_time", "heltidsarbete": "full_time",
+            "part time": "part_time", "osa aikainen": "part_time", "deltid": "part_time",
+        })
+        if hours_type:
+            effective["hours_type"] = hours_type
+    return effective
 
 
 def hard_requirement_failures(*, required: list[str], confirmed_facts: list[str]) -> list[str]:
@@ -87,20 +207,28 @@ def matches_preferences(*, job: Mapping[str, object], preferences: Mapping[str, 
             return False
     work_type = str(preferences.get("work_type", "any"))
     markers = {
-        "onsite": ("on-site", "onsite", "paikan päällä"),
+        "onsite": ("on-site", "onsite", "paikan päällä", "lähityö", "på plats", "på arbetsplatsen"),
         "hybrid": ("hybrid", "hybridi"),
-        "remote": ("remote", "etätyö", "etä-"),
+        "remote": ("remote", "work from home", "work-from-home", "etätyö", "etä-", "distansarbete"),
     }
     if work_type in markers and not any(marker in searchable for marker in markers[work_type]):
         return False
     employment_markers = {
         "full_time": ("full-time", "full time", "kokoaikainen"),
         "part_time": ("part-time", "part time", "osa-aikainen"),
-        "temporary": ("temporary", "fixed-term", "määräaikainen", "sijaisuus"),
-        "seasonal": ("seasonal", "summer job", "kesätyö", "kausityö"),
+        "permanent": ("permanent", "indefinite", "toistaiseksi voimassa oleva", "vakituinen", "tillsvidare"),
+        "temporary": ("temporary", "fixed-term", "fixed term", "määräaikainen", "sijaisuus", "tillfällig", "visstidsanställning"),
+        "seasonal": ("seasonal", "summer job", "kesätyö", "kausityö", "säsongsarbete"),
     }
     employment_type = str(preferences.get("employment_type", "any"))
     if employment_type in employment_markers and not any(marker in searchable for marker in employment_markers[employment_type]):
+        return False
+    hours_markers = {
+        "full_time": ("full-time", "full time", "kokoaikainen", "kokopäiväinen", "heltid"),
+        "part_time": ("part-time", "part time", "osa-aikainen", "deltid"),
+    }
+    hours_type = str(preferences.get("hours_type", "any"))
+    if hours_type in hours_markers and not any(marker in searchable for marker in hours_markers[hours_type]):
         return False
     schedule_markers = {
         "day": ("day shift", "päivävuoro"),

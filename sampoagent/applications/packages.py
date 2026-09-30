@@ -109,7 +109,7 @@ def enqueue_eligible_applications(repository: object, storage_dir: Path) -> int:
         job = repository.job(job_id)
         if not job or not _active_verified_job(job):
             continue
-        if not matches_preferences(job=job, preferences=repository.preferences()):
+        if not matches_preferences(job=job, preferences=repository.effective_search_preferences()):
             continue
         score = evaluate_job(
             job=job, confirmed_facts=facts, confirmed_records=confirmed_records, configs=configs,

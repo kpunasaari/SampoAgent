@@ -48,6 +48,10 @@ Open [http://127.0.0.1:8765](http://127.0.0.1:8765). The service intentionally b
 5. Configure thresholds, daily application limit, email connection, and application mode.
 6. Start in Dry Run; it never writes candidate data into an employer form or makes final submissions.
 
+### Confirmed profile preferences in job matching
+
+If enabled in Settings (the default), a current, explicitly confirmed, global questionnaire answer can fill a blank location filter or an unrestricted work-setting, contract-type, or weekly-hours filter. Settings values always take precedence. Only simple comma-separated place-name lists and exact supported choices are mapped; ambiguous prose is ignored. Employer-specific salary/shift answers and preferred job titles are never promoted to global search filters, and recommendations still require explicit role activation. The filter is shared by discovery, existing job matching, queue preparation, and the last application-scope check. Search radius is stored but not yet applied because the app has no reliable offline distance source.
+
 ### Application modes and browser automation
 
 - **Review Everything** is the default; SampoAgent prepares and tracks applications but does not submit them.

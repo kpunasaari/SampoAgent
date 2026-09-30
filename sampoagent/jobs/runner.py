@@ -104,6 +104,7 @@ def run_discovery(
     json_adapter = json_adapter or JsonFeedAdapter()
     scrapling_adapter = scrapling_adapter or ScraplingAdapter()
     all_sources = repository.rows("job_sources")
+    preferences = repository.effective_search_preferences()
     facts = repository.rows("facts")
     record_types = ("experience", "education", "certificate", "licence", "language", "availability")
     candidate_records = {record_type: repository.candidate_records(record_type) for record_type in record_types}
@@ -112,7 +113,7 @@ def run_discovery(
         candidate_records=candidate_records,
         targets=repository.target_occupations(),
         career_profiles=repository.rows("career_profiles"),
-        preferences=repository.preferences(),
+        preferences=preferences,
         sources=all_sources,
         max_queries=max_queries,
     )
@@ -131,7 +132,7 @@ def run_discovery(
     total_found = imported = duplicates = 0
     had_error = False
     automatic_sources_checked = 0
-    sources = sorted(eligible_sources(all_sources, repository.preferences()), key=lambda item: int(item.get("id", 0)))
+    sources = sorted(eligible_sources(all_sources, preferences), key=lambda item: int(item.get("id", 0)))
     cursor_raw = repository.setting("discovery_source_cursor") or ""
     try:
         cursor = int(cursor_raw)
@@ -187,7 +188,7 @@ def run_discovery(
                     if is_relevant_job(
                         job,
                         plan=plan,
-                        preferences=repository.preferences(),
+                        preferences=preferences,
                         source_type=str(source.get("source_type", "")),
                         source_id=source_id,
                     )

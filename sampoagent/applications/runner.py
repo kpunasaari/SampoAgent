@@ -106,7 +106,7 @@ def _register_missing_application_questions(
 
 
 def _matches_autopilot_role_scope(repository: object, job: dict[str, object]) -> bool:
-    preferences = repository.preferences()
+    preferences = repository.effective_search_preferences()
     source_id = job.get("source_id")
     if source_id is not None:
         source = repository.source(int(source_id))
@@ -157,7 +157,7 @@ def _policy_state(
         daily_limit=daily_limit,
         autopilot_authorized=repository.autopilot_authorized(),
         within_scope=(
-            matches_preferences(job=job, preferences=repository.preferences())
+            matches_preferences(job=job, preferences=repository.effective_search_preferences())
             and (mode != ApplicationMode.AUTOPILOT or _matches_autopilot_role_scope(repository, job))
         ),
         required_answers_resolved=answers_resolved,

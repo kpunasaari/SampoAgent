@@ -253,7 +253,7 @@ def prepare_autopilot_email_application(repository: object, storage_dir: Path, a
         )
         return "HELD"
     try:
-        in_scope = matches_preferences(job=job, preferences=repository.preferences()) and _matches_autopilot_role_scope(repository, job)
+        in_scope = matches_preferences(job=job, preferences=repository.effective_search_preferences()) and _matches_autopilot_role_scope(repository, job)
     except (TypeError, ValueError):
         in_scope = False
     if not in_scope:
@@ -395,7 +395,7 @@ def send_approved_application_email(
     if autopilot:
         job = repository.job(int(application["job_id"]))
         try:
-            in_scope = bool(job) and matches_preferences(job=job, preferences=repository.preferences()) and _matches_autopilot_role_scope(repository, job)
+            in_scope = bool(job) and matches_preferences(job=job, preferences=repository.effective_search_preferences()) and _matches_autopilot_role_scope(repository, job)
         except (TypeError, ValueError):
             in_scope = False
         if not in_scope:

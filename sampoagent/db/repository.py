@@ -1925,7 +1925,8 @@ class Repository:
             "targets": targets,
             "career_profiles": career_profiles,
             "sources": sources,
-            "preferences": self.preferences(),
+            "preferences": self.effective_search_preferences(),
+            "use_profile_preferences": self.setting("use_profile_preferences") != "false",
             "application_mode": self.setting("application_mode"),
             "daily_limit": self.setting("daily_limit"),
         }
@@ -2867,6 +2868,15 @@ class Repository:
     def preferences(self) -> dict[str, object]:
         raw = self.setting("job_preferences")
         return json.loads(raw) if raw else {}
+
+    def effective_search_preferences(self) -> dict[str, object]:
+        """Resolve explicit Settings plus supported confirmed onboarding fallbacks."""
+        saved = self.preferences()
+        if self.setting("use_profile_preferences") == "false":
+            return saved
+        from sampoagent.jobs.matching import merge_confirmed_profile_preferences
+
+        return merge_confirmed_profile_preferences(saved, self.answers())
 
     def cache_put(self, cache_key: str, value: str) -> None:
         self.connection.execute("INSERT INTO semantic_cache(cache_key, value, created_at) VALUES (?, ?, ?) ON CONFLICT(cache_key) DO UPDATE SET value=excluded.value, created_at=excluded.created_at", (cache_key, value, datetime.now(timezone.utc).isoformat()))

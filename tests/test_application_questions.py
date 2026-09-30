@@ -228,4 +228,3 @@ def test_existing_database_gets_application_answer_table_additively(tmp_path):
     assert upgraded.connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='application_form_answers'").fetchone()
     assert upgraded.application_questions(application_id) == []
     upgraded.connection.close()
-

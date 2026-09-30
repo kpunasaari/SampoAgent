@@ -31,4 +31,3 @@ When an otherwise supported application form requires a safe fact that is not in
 - Route tests prove the exact prompt/options are visible, a candidate confirmation and local token are required, invalid choices are rejected, answers never appear in another application's queue, and the ready transition occurs only after all pending questions are answered.
 - Runner tests prove Full Autopilot resumes without a per-job review after the candidate answers a missing field, while other existing mode gates remain unchanged; a stale form or listing snapshot re-asks and never submits using the old answer.
 - Full pytest, compileall, CLI help, and diff checks remain required. No real candidate record or employer form is used.
-

@@ -247,8 +247,52 @@ def test_captcha_ui_requires_manual_single_item_completion():
     client.post("/captcha/1/start")
     page = client.get("/captcha")
     assert "Open official application" in page.text
-    assert "complete its CAPTCHA yourself" in page.text
+    assert "Complete its CAPTCHA yourself" in page.text
     assert "I submitted and saw confirmation" in page.text
+
+
+def test_captcha_queue_offers_only_one_waiting_task_until_it_is_finished():
+    from fastapi.testclient import TestClient
+    from sampoagent.app.main import create_app
+
+    app = create_app(database_path=":memory:", demo_data=True)
+    repository = app.state.repository
+    first_application = repository.queue_application(1, language="en", cv_path=None)
+    second_application = repository.queue_application(2, language="fi", cv_path=None)
+    first_task = repository.hold_for_captcha(
+        first_application, detected_url="https://example.test/apply/1",
+    )
+    second_task = repository.hold_for_captcha(
+        second_application, detected_url="https://example.test/apply/2",
+    )
+    client = TestClient(app, follow_redirects=False)
+
+    waiting_page = client.get("/captcha").text
+    assert f"action='/captcha/{first_task}/start'" in waiting_page
+    assert f"action='/captcha/{second_task}/start'" not in waiting_page
+    assert "href='https://example.test/apply/1'" not in waiting_page
+    assert "href='https://example.test/apply/2'" not in waiting_page
+    assert "Waiting for the current CAPTCHA task to finish" in waiting_page
+
+    assert client.post(f"/captcha/{first_task}/start").status_code == 303
+    active_page = client.get("/captcha").text
+    assert f"action='/captcha/{first_task}/finish'" in active_page
+    assert f"action='/captcha/{second_task}/start'" not in active_page
+    assert "href='https://example.test/apply/1'" in active_page
+    assert "href='https://example.test/apply/2'" not in active_page
+
+    assert client.post(
+        f"/captcha/{first_task}/finish",
+        data={"outcome": "skip", "confirmation_message": ""},
+    ).status_code == 303
+    next_page = client.get("/captcha").text
+    assert f"action='/captcha/{second_task}/start'" in next_page
+    assert "href='https://example.test/apply/2'" not in next_page
+
+    assert client.post(f"/captcha/{second_task}/start").status_code == 303
+    next_active_page = client.get("/captcha").text
+    assert f"action='/captcha/{second_task}/finish'" in next_active_page
+    assert "href='https://example.test/apply/2'" in next_active_page
 
 
 def test_dashboard_calls_for_user_help_when_captcha_tasks_are_waiting():

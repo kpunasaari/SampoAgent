@@ -771,10 +771,25 @@ def create_app(
     def captcha_queue() -> HTMLResponse:
         tasks = repository.captcha_tasks()
         cards = []
+        active_task = next((task for task in tasks if task["state"] == "IN_PROGRESS"), None)
+        next_waiting_task = next(
+            (task for task in tasks if task["state"] == "WAITING_USER"), None
+        ) if active_task is None else None
         for task in tasks:
-            start = f"<form method='post' action='/captcha/{task['id']}/start'><button>Handle this one</button></form>" if task["state"] == "WAITING_USER" else "<span class='status status-review'>In progress · finish before starting another</span>"
+            if task["state"] == "IN_PROGRESS":
+                start = "<span class='status status-review'>In progress · finish before starting another</span>"
+                instructions = "<p>Automatic activity is paused at this challenge. Complete its CAPTCHA yourself, then record the outcome before handling the next item.</p>"
+                application_link = f"<a href='{escape(str(task['detected_url']))}' target='_blank' rel='noopener noreferrer'>Open official application</a>"
+            elif next_waiting_task is not None and task["id"] == next_waiting_task["id"]:
+                start = f"<form method='post' action='/captcha/{task['id']}/start'><button>Handle this one</button></form>"
+                instructions = "<p>This is the next waiting CAPTCHA task. Start it to open its official application page for manual handling.</p>"
+                application_link = ""
+            else:
+                start = "<span class='status status-review'>Waiting for the current CAPTCHA task to finish</span>"
+                instructions = "<p>This challenge is queued. Its official application page stays closed until it becomes the active task.</p>"
+                application_link = ""
             finish = f"<form method='post' action='/captcha/{task['id']}/finish'><label>Outcome <select name='outcome'><option value='submitted'>I submitted and saw confirmation</option><option value='not_submitted'>Not submitted</option><option value='skip'>Skip this job</option></select></label><label>Employer confirmation (required if submitted) <input name='confirmation_message' maxlength='300'></label><button>Record outcome</button></form>" if task["state"] == "IN_PROGRESS" else ""
-            cards.append(f"<article class='metric-card'><h3>{escape(str(task['title']))} — {escape(str(task['company']))}</h3><p>Application {task['application_id']} · {escape(str(task['state']))}</p><p>Automatic activity is paused at this challenge. Open the employer's page, complete its CAPTCHA yourself, then finish this item before handling the next.</p><a href='{escape(str(task['detected_url']))}' target='_blank' rel='noopener noreferrer'>Open official application</a>{start}{finish}</article>")
+            cards.append(f"<article class='metric-card'><h3>{escape(str(task['title']))} — {escape(str(task['company']))}</h3><p>Application {task['application_id']} · {escape(str(task['state']))}</p>{instructions}{application_link}{start}{finish}</article>")
         body = "<section><h2>CAPTCHA tasks</h2><p>Blocked applications stay here until you handle them individually. SampoAgent will not solve or bypass CAPTCHA.</p>" + ("".join(cards) or "<p class='empty-state'>No CAPTCHA tasks are waiting.</p>") + "</section>"
         return _page("CAPTCHA Queue", body)
 

@@ -7,13 +7,14 @@ def _application(repository: Repository, job_id: int = 1) -> int:
     return repository.queue_application(job_id, language="en", cv_path=None)
 
 
-def _question(field_id: str, *, label: str | None = None, kind: str = "text", options=(), required: bool = True, risk: str = "LOW") -> dict[str, object]:
+def _question(field_id: str, *, label: str | None = None, kind: str = "text", options=(), constraints=None, required: bool = True, risk: str = "LOW") -> dict[str, object]:
     return {
         "field_id": field_id,
         "label": label or field_id.replace("_", " ").title(),
         "description": "Answer only if this is accurate for you.",
         "kind": kind,
         "options": list(options),
+        "constraints": dict(constraints or {}),
         "required": required,
         "risk": risk,
     }
@@ -74,6 +75,8 @@ def test_application_answer_requires_exact_saved_choice_and_ready_transition_wai
 
     with pytest.raises(ValueError):
         repository.answer_application_question(application_id, int(shift["id"]), "Any shift", confirmed=True)
+    with pytest.raises(ValueError):
+        repository.answer_application_question(application_id, int(start_date["id"]), "2026-10-1", confirmed=True)
 
     repository.answer_application_question(application_id, int(shift["id"]), "Day", confirmed=True)
     assert repository.application(application_id)["queue_state"] == "WAITING_USER"
@@ -164,7 +167,7 @@ def test_application_question_server_validates_email_and_number_and_preserves_te
         listing_hash="b" * 64,
         questions=[
             _question("email", kind="email"),
-            _question("salary", kind="number"),
+            _question("salary", kind="number", constraints={"min": "0", "max": "10000", "step": "100"}),
             _question("note", kind="textarea"),
         ],
     )
@@ -173,11 +176,44 @@ def test_application_question_server_validates_email_and_number_and_preserves_te
     with pytest.raises(ValueError):
         repository.answer_application_question(application_id, int(questions["email"]["id"]), "not an email", confirmed=True)
     with pytest.raises(ValueError):
+        repository.answer_application_question(application_id, int(questions["email"]["id"]), "bad..name@example.fi", confirmed=True)
+    with pytest.raises(ValueError):
         repository.answer_application_question(application_id, int(questions["salary"]["id"]), "NaN", confirmed=True)
+    with pytest.raises(ValueError):
+        repository.answer_application_question(application_id, int(questions["salary"]["id"]), "1_000", confirmed=True)
+    with pytest.raises(ValueError):
+        repository.answer_application_question(application_id, int(questions["salary"]["id"]), "10001", confirmed=True)
+    with pytest.raises(ValueError):
+        repository.answer_application_question(application_id, int(questions["salary"]["id"]), "9999", confirmed=True)
     repository.answer_application_question(application_id, int(questions["note"]["id"]), "First paragraph\n\nSecond paragraph", confirmed=True)
 
     saved = repository.application_form_answers(application_id, form_signature="a" * 64, listing_hash="b" * 64)
     assert saved["note"] == "First paragraph\n\nSecond paragraph"
+
+
+def test_application_form_constraints_are_persisted_and_stale_answers_on_constraint_change(tmp_path):
+    repository = _repository(tmp_path)
+    application_id = _application(repository)
+    repository.update_application_status(application_id, "NEEDS_USER", "Missing required answer", queue_state="WAITING_USER")
+    repository.register_application_questions(
+        application_id,
+        form_signature="a" * 64,
+        listing_hash="b" * 64,
+        questions=[_question("salary", kind="number", constraints={"min": "1000", "max": "5000", "step": "100"})],
+    )
+    question = repository.application_questions(application_id)[0]
+    assert question["constraints"] == {"min": "1000", "max": "5000", "step": "100"}
+    repository.answer_application_question(application_id, int(question["id"]), "2500", confirmed=True)
+
+    repository.update_application_status(application_id, "NEEDS_USER", "Employer form changed", queue_state="WAITING_USER")
+    repository.register_application_questions(
+        application_id,
+        form_signature="c" * 64,
+        listing_hash="b" * 64,
+        questions=[_question("salary", kind="number", constraints={"min": "3000", "max": "5000", "step": "100"})],
+    )
+
+    assert repository.application_form_answers(application_id, form_signature="c" * 64, listing_hash="b" * 64) == {}
 
 
 def test_application_answer_changes_only_application_context_not_autopilot_grant_or_learning_digest(tmp_path):
@@ -218,6 +254,16 @@ def test_existing_database_gets_application_answer_table_additively(tmp_path):
     repository.load_demo()
     application_id = repository.queue_application(1, language="en", cv_path=None)
     repository.connection.execute("DROP TABLE application_form_answers")
+    repository.connection.execute(
+        "CREATE TABLE application_form_answers (id INTEGER PRIMARY KEY, application_id INTEGER NOT NULL, "
+        "field_id TEXT NOT NULL, form_signature TEXT NOT NULL, listing_hash TEXT NOT NULL, label TEXT NOT NULL, "
+        "description TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL, options_json TEXT NOT NULL DEFAULT '[]', "
+        "required INTEGER NOT NULL DEFAULT 1, risk TEXT NOT NULL CHECK(risk IN ('LOW','MEDIUM')), "
+        "state TEXT NOT NULL DEFAULT 'PENDING' CHECK(state IN ('PENDING','ANSWERED','STALE')), "
+        "answer_value TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, answered_at TEXT, "
+        "UNIQUE(application_id, form_signature, listing_hash, field_id), "
+        "FOREIGN KEY(application_id) REFERENCES applications(id) ON DELETE CASCADE)"
+    )
     repository.connection.commit()
     repository.connection.close()
 
@@ -226,5 +272,6 @@ def test_existing_database_gets_application_answer_table_additively(tmp_path):
 
     assert upgraded.application(application_id) is not None
     assert upgraded.connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='application_form_answers'").fetchone()
+    assert "constraints_json" in {row[1] for row in upgraded.connection.execute("PRAGMA table_info(application_form_answers)")}
     assert upgraded.application_questions(application_id) == []
     upgraded.connection.close()

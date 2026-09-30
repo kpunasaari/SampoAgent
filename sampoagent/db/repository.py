@@ -2,7 +2,7 @@
 
 from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, DecimalException, InvalidOperation
 from email.utils import parseaddr
 from hashlib import sha256
 from pathlib import Path
@@ -44,6 +44,9 @@ _SAFE_ACTIVITY_DETAIL = "Activity details omitted to protect privacy."
 _AUTOPILOT_POLICY_VERSION = "stepwise-form-save-v1"
 _APPLICATION_ANSWER_KINDS = frozenset({"text", "textarea", "email", "tel", "number", "date", "select", "radio"})
 _APPLICATION_ANSWER_SECRETS = ("password", "passwd", "access token", "api key", "secret=")
+_APPLICATION_ANSWER_CONSTRAINTS = ("min", "max", "step", "pattern", "minlength", "maxlength", "step_base")
+_APPLICATION_EMAIL = re.compile(r"[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*")
+_APPLICATION_NUMBER = re.compile(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?")
 
 
 def _split_candidate_values(value: str) -> list[str]:
@@ -102,7 +105,7 @@ class Repository:
             CREATE TABLE IF NOT EXISTS job_overrides (job_id INTEGER PRIMARY KEY, decision TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, FOREIGN KEY(job_id) REFERENCES jobs(id));
             CREATE TABLE IF NOT EXISTS applications (id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL, status TEXT NOT NULL, queue_state TEXT NOT NULL, language TEXT NOT NULL, cv_path TEXT, notes TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(job_id) REFERENCES jobs(id));
             CREATE TABLE IF NOT EXISTS application_reviews (application_id INTEGER PRIMARY KEY, package_hash TEXT NOT NULL, package_json TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('WAITING','APPROVED')), created_at TEXT NOT NULL, approved_at TEXT, FOREIGN KEY(application_id) REFERENCES applications(id) ON DELETE CASCADE);
-            CREATE TABLE IF NOT EXISTS application_form_answers (id INTEGER PRIMARY KEY, application_id INTEGER NOT NULL, field_id TEXT NOT NULL, form_signature TEXT NOT NULL, listing_hash TEXT NOT NULL, label TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL, options_json TEXT NOT NULL DEFAULT '[]', required INTEGER NOT NULL DEFAULT 1, risk TEXT NOT NULL CHECK(risk IN ('LOW','MEDIUM')), state TEXT NOT NULL DEFAULT 'PENDING' CHECK(state IN ('PENDING','ANSWERED','STALE')), answer_value TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, answered_at TEXT, UNIQUE(application_id, form_signature, listing_hash, field_id), FOREIGN KEY(application_id) REFERENCES applications(id) ON DELETE CASCADE);
+            CREATE TABLE IF NOT EXISTS application_form_answers (id INTEGER PRIMARY KEY, application_id INTEGER NOT NULL, field_id TEXT NOT NULL, form_signature TEXT NOT NULL, listing_hash TEXT NOT NULL, label TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL, options_json TEXT NOT NULL DEFAULT '[]', constraints_json TEXT NOT NULL DEFAULT '{}', required INTEGER NOT NULL DEFAULT 1, risk TEXT NOT NULL CHECK(risk IN ('LOW','MEDIUM')), state TEXT NOT NULL DEFAULT 'PENDING' CHECK(state IN ('PENDING','ANSWERED','STALE')), answer_value TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, answered_at TEXT, UNIQUE(application_id, form_signature, listing_hash, field_id), FOREIGN KEY(application_id) REFERENCES applications(id) ON DELETE CASCADE);
             CREATE TABLE IF NOT EXISTS submission_evidence (id INTEGER PRIMARY KEY, application_id INTEGER NOT NULL, final_url TEXT NOT NULL, confirmation_message TEXT NOT NULL, confirmation_id TEXT, agent_provider TEXT NOT NULL, created_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS answer_bank (id INTEGER PRIMARY KEY, category TEXT NOT NULL, question TEXT NOT NULL, value TEXT NOT NULL, source TEXT NOT NULL, created_at TEXT NOT NULL, question_id TEXT NOT NULL DEFAULT '', answer_state TEXT NOT NULL DEFAULT 'DRAFT', value_type TEXT NOT NULL DEFAULT 'text', sensitivity TEXT NOT NULL DEFAULT 'NORMAL', scope_type TEXT NOT NULL DEFAULT 'GLOBAL', scope_country TEXT NOT NULL DEFAULT '', scope_employer TEXT NOT NULL DEFAULT '', valid_until TEXT, confirmed_at TEXT, source_ref TEXT NOT NULL DEFAULT '');
             CREATE TABLE IF NOT EXISTS application_timeline (id INTEGER PRIMARY KEY, application_id INTEGER NOT NULL, status TEXT NOT NULL, note TEXT NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY(application_id) REFERENCES applications(id));
@@ -131,6 +134,9 @@ class Repository:
         application_columns = {row[1] for row in self.connection.execute("PRAGMA table_info(applications)")}
         if "preparation_token" not in application_columns:
             self.connection.execute("ALTER TABLE applications ADD COLUMN preparation_token TEXT")
+        application_answer_columns = {row[1] for row in self.connection.execute("PRAGMA table_info(application_form_answers)")}
+        if "constraints_json" not in application_answer_columns:
+            self.connection.execute("ALTER TABLE application_form_answers ADD COLUMN constraints_json TEXT NOT NULL DEFAULT '{}'")
         outbox_columns = {row[1] for row in self.connection.execute("PRAGMA table_info(email_outbox)")}
         if "sender_account_id" not in outbox_columns:
             self.connection.execute("ALTER TABLE email_outbox ADD COLUMN sender_account_id INTEGER")
@@ -2413,9 +2419,15 @@ class Repository:
             options = [str(option).strip() for option in options_raw if str(option).strip()] if isinstance(options_raw, (tuple, list)) else []
             if kind in {"select", "radio"} and (not options or len(options) > 100 or any(len(option) > 500 for option in options)):
                 continue
+            constraints_raw = question.get("constraints", {})
+            constraints = {
+                key: str(constraints_raw[key]).strip()[:512]
+                for key in _APPLICATION_ANSWER_CONSTRAINTS
+                if isinstance(constraints_raw, dict) and key in constraints_raw and str(constraints_raw[key]).strip()
+            }
             eligible.append({
                 "field_id": field_id, "label": label, "description": description[:2000],
-                "kind": kind, "risk": risk, "options": options,
+                "kind": kind, "risk": risk, "options": options, "constraints": constraints,
             })
         now = datetime.now(timezone.utc).isoformat()
         inserted = 0
@@ -2456,13 +2468,14 @@ class Repository:
                 kind = str(question["kind"])
                 risk = str(question["risk"])
                 options = question["options"]
+                constraints = question["constraints"]
                 self.connection.execute(
-                    "INSERT INTO application_form_answers(application_id,field_id,form_signature,listing_hash,label,description,kind,options_json,required,risk,state,created_at) "
-                    "VALUES (?,?,?,?,?,?,?,?,1,?,'PENDING',?) "
+                    "INSERT INTO application_form_answers(application_id,field_id,form_signature,listing_hash,label,description,kind,options_json,constraints_json,required,risk,state,created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,1,?,'PENDING',?) "
                     "ON CONFLICT(application_id,form_signature,listing_hash,field_id) DO UPDATE SET "
-                    "label=excluded.label,description=excluded.description,kind=excluded.kind,options_json=excluded.options_json,risk=excluded.risk "
+                    "label=excluded.label,description=excluded.description,kind=excluded.kind,options_json=excluded.options_json,constraints_json=excluded.constraints_json,risk=excluded.risk "
                     "WHERE application_form_answers.state='PENDING'",
-                    (application_id, field_id, form_signature, listing_hash, label, description[:2000], kind, json.dumps(options, ensure_ascii=False), risk, now),
+                    (application_id, field_id, form_signature, listing_hash, label, description[:2000], kind, json.dumps(options, ensure_ascii=False), json.dumps(constraints, ensure_ascii=False), risk, now),
                 )
                 inserted += int(self.connection.execute("SELECT changes()").fetchone()[0] > 0)
         return inserted
@@ -2491,6 +2504,10 @@ class Repository:
                 item["options"] = json.loads(str(item.pop("options_json", "[]")))
             except (TypeError, ValueError):
                 item["options"] = []
+            try:
+                item["constraints"] = json.loads(str(item.pop("constraints_json", "{}")))
+            except (TypeError, ValueError):
+                item["constraints"] = {}
             result.append(item)
         return result
 
@@ -2518,18 +2535,98 @@ class Repository:
                 options = json.loads(str(row["options_json"]))
                 if clean_value not in options:
                     raise ValueError("Choose one of the saved employer form options")
+            try:
+                constraints = json.loads(str(row["constraints_json"]))
+            except (TypeError, ValueError) as error:
+                raise ValueError("Employer form constraints are invalid") from error
+            if not isinstance(constraints, dict):
+                raise ValueError("Employer form constraints are invalid")
+            if row["kind"] in {"text", "textarea", "email", "tel"}:
+                for key, comparator in (("minlength", lambda size, limit: size >= limit), ("maxlength", lambda size, limit: size <= limit)):
+                    if key in constraints:
+                        try:
+                            limit = int(constraints[key])
+                        except (TypeError, ValueError) as error:
+                            raise ValueError("Employer text-length constraint is invalid") from error
+                        if limit < 0 or not comparator(len(clean_value), limit):
+                            raise ValueError("Answer does not satisfy the employer's text-length requirement")
             if row["kind"] == "date":
-                date.fromisoformat(clean_value)
+                if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", clean_value):
+                    raise ValueError("Enter a date in YYYY-MM-DD format")
+                try:
+                    parsed_date = date.fromisoformat(clean_value)
+                except ValueError as error:
+                    raise ValueError("Enter a valid YYYY-MM-DD date") from error
+                for key, comparator in (("min", lambda actual, limit: actual >= limit), ("max", lambda actual, limit: actual <= limit)):
+                    if key in constraints:
+                        try:
+                            limit = str(date.fromisoformat(str(constraints[key])))
+                        except ValueError as error:
+                            raise ValueError("Employer date constraint is invalid") from error
+                        if not comparator(clean_value, limit):
+                            raise ValueError("Date does not satisfy the employer's allowed range")
+                step_raw = str(constraints.get("step", "1"))
+                if step_raw != "any":
+                    try:
+                        step = Decimal(step_raw)
+                    except InvalidOperation as error:
+                        raise ValueError("Employer date step is invalid") from error
+                    base_raw = str(constraints.get("min", constraints.get("step_base", "1970-01-01")))
+                    try:
+                        base_date = date.fromisoformat(base_raw)
+                    except ValueError as error:
+                        raise ValueError("Employer date step base is invalid") from error
+                    try:
+                        step_mismatch = Decimal((parsed_date - base_date).days) % step != 0
+                    except DecimalException as error:
+                        raise ValueError("Employer date step could not be validated") from error
+                    if not step.is_finite() or step <= 0 or step_mismatch:
+                        raise ValueError("Date does not satisfy the employer's date-step requirement")
             if row["kind"] == "email":
                 parsed_email = parseaddr(clean_value)[1]
-                if parsed_email != clean_value or clean_value.count("@") != 1 or any(char.isspace() for char in clean_value):
+                local_part, separator, domain = clean_value.rpartition("@")
+                if (
+                    parsed_email != clean_value or not separator or clean_value.count("@") != 1
+                    or not local_part or not domain or local_part.startswith(".") or local_part.endswith(".")
+                    or domain.startswith(".") or domain.endswith(".") or ".." in domain
+                    or ".." in local_part or len(clean_value) > 254
+                    or not _APPLICATION_EMAIL.fullmatch(clean_value)
+                ):
                     raise ValueError("Enter a valid email address")
             if row["kind"] == "number":
+                if not _APPLICATION_NUMBER.fullmatch(clean_value):
+                    raise ValueError("Enter a valid number")
                 try:
-                    if not Decimal(clean_value).is_finite():
+                    number = Decimal(clean_value)
+                    if not number.is_finite():
                         raise ValueError("Enter a finite number")
                 except InvalidOperation as error:
                     raise ValueError("Enter a valid number") from error
+                for key, comparator in (("min", lambda actual, limit: actual >= limit), ("max", lambda actual, limit: actual <= limit)):
+                    if key in constraints:
+                        try:
+                            limit = Decimal(str(constraints[key]))
+                        except InvalidOperation as error:
+                            raise ValueError("Employer numeric constraint is invalid") from error
+                        try:
+                            in_range = comparator(number, limit)
+                        except DecimalException as error:
+                            raise ValueError("Employer numeric range could not be validated") from error
+                        if not limit.is_finite() or not in_range:
+                            raise ValueError("Number does not satisfy the employer's allowed range")
+                step_raw = str(constraints.get("step", "1"))
+                if step_raw != "any":
+                    try:
+                        step = Decimal(step_raw)
+                        base = Decimal(str(constraints.get("min", constraints.get("step_base", "0"))))
+                    except InvalidOperation as error:
+                        raise ValueError("Employer numeric step is invalid") from error
+                    try:
+                        step_mismatch = (number - base) % step != 0
+                    except DecimalException as error:
+                        raise ValueError("Employer numeric step could not be validated") from error
+                    if not step.is_finite() or step <= 0 or not base.is_finite() or step_mismatch:
+                        raise ValueError("Number does not satisfy the employer's step requirement")
             now = datetime.now(timezone.utc).isoformat()
             self.connection.execute(
                 "UPDATE application_form_answers SET state='ANSWERED',answer_value=?,answered_at=? WHERE id=?",

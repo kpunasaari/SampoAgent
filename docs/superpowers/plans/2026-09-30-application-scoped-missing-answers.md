@@ -61,6 +61,7 @@
 - [x] Test that a missing field shows its escaped employer prompt/options with an application-only disclosure.
 - [x] Test that wrong local tokens and missing candidate confirmation cannot save an answer; exact choices save and never leak into another application.
 - [x] Add local-token-protected response routes and typed controls for supported question kinds; escape all employer-supplied text.
+- [x] Bind native numeric/date/text/pattern constraints into schema signatures and saved question records; validate local bounds and native browser validity before proceeding.
 - [x] Return the application to `READY` only after the last pending question is confirmed; let the existing worker and selected mode make the next decision.
 - [x] Run the focused route and UI tests.
 
@@ -74,7 +75,7 @@
 
 ## Verification record — 2026-09-30
 
-- `py -m pytest -q`: 501 passed; one upstream Starlette/httpx deprecation warning.
+- `py -m pytest -q`: 503 passed; one upstream Starlette/httpx deprecation warning.
 - `py -m compileall -q sampoagent tests`: passed.
 - `py -m sampoagent --help`: passed.
 - `git diff --check`: passed.

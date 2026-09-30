@@ -168,11 +168,26 @@ def test_form_schema_hash_binds_semantic_fields_origin_action_and_step_checkpoin
         navigation_checkpoint="1 of 2 · Contact details",
         has_next_step=True,
     )
+    changed_constraint = FormSchema.build(
+        fields=(FormField("salary", "Salary expectation", True, "number", name="salary", constraints=(("min", "1000"), ("step", "100"))),),
+        page_url="https://careers.employer.fi/apply/step-1",
+        action_url="https://careers.employer.fi/apply/submit",
+        navigation_checkpoint="1 of 2 · Contact details",
+        has_next_step=True,
+    )
+    original_constraint = FormSchema.build(
+        fields=(FormField("salary", "Salary expectation", True, "number", name="salary", constraints=(("min", "0"), ("step", "100"))),),
+        page_url="https://careers.employer.fi/apply/step-1",
+        action_url="https://careers.employer.fi/apply/submit",
+        navigation_checkpoint="1 of 2 · Contact details",
+        has_next_step=True,
+    )
 
     assert base.page_origin == "https://careers.employer.fi"
     assert base.signature != changed_field.signature
     assert base.signature != changed_prompt.signature
-    assert base.schema_version == "1.1"
+    assert original_constraint.signature != changed_constraint.signature
+    assert base.schema_version == "1.2"
 
 
 def test_advance_step_refuses_a_changed_snapshot_or_revoked_permission():
@@ -444,7 +459,7 @@ def test_multiple_file_upload_is_captured_in_schema_and_never_filled_by_single_c
         field = inspection.fields[0]
         assert field.allows_multiple_files is True
         assert inspection.schema is not None
-        assert inspection.schema.schema_version == "1.1"
+        assert inspection.schema.schema_version == "1.2"
         assert inspection.schema.signature
         single_file_schema = FormSchema.build(
             fields=(replace(field, allows_multiple_files=False),),
@@ -475,7 +490,8 @@ def test_synthetic_finnish_swedish_english_ats_form_shape_matrix():
         ("en-email", "<label for='v'>Email address</label><input id='v' name='email_en' type='email'>", [("email_en", "Email address", False, "email", (), "label")]),
         ("sv-phone", "<label for='v'>Telefonnummer</label><input id='v' name='phone_sv' type='tel' required>", [("phone_sv", "Telefonnummer", True, "tel", (), "label")]),
         ("fi-date", "<label for='v'>Aloituspäivä</label><input id='v' name='start_date' type='date' required>", [("start_date", "Aloituspäivä", True, "date", (), "label")]),
-        ("en-textarea", "<label for='v'>Additional details</label><textarea id='v' name='details'></textarea>", [("details", "Additional details", False, "text", (), "label")]),
+        ("en-textarea", "<label for='v'>Additional details</label><textarea id='v' name='details'></textarea>", [("details", "Additional details", False, "textarea", (), "label")]),
+        ("en-number", "<label for='v'>Years of experience</label><input id='v' name='experience_years' type='number' min='0' max='20' step='1' required>", [("experience_years", "Years of experience", True, "number", (), "label")]),
         ("sv-checkbox", "<label for='v'>Nyhetsbrev</label><input id='v' name='newsletter' type='checkbox'>", [("newsletter", "Nyhetsbrev", False, "checkbox", (), "label")]),
         ("fi-checkbox-group", "<fieldset><legend>Työvuorot</legend><label><input type='checkbox' name='shift_fi' value='day'>Päivä</label><label><input type='checkbox' name='shift_fi' value='night'>Yö</label></fieldset>", [("shift_fi", "Työvuorot", False, "checkbox_group", ("Päivä", "Yö"), "fieldset legend")]),
         ("en-checkbox-group", "<fieldset><legend>Preferred contact</legend><label><input type='checkbox' name='contact' value='email'>Email</label><label><input type='checkbox' name='contact' value='phone'>Phone</label></fieldset>", [("contact", "Preferred contact", False, "checkbox_group", ("Email", "Phone"), "fieldset legend")]),
@@ -488,7 +504,7 @@ def test_synthetic_finnish_swedish_english_ats_form_shape_matrix():
         ("sv-select", "<label for='v'>Anställningsform</label><select id='v' name='employment_sv' required><option>Tillsvidare</option><option>Visstid</option></select>", [("employment_sv", "Anställningsform", True, "select", ("Tillsvidare", "Visstid"), "label")]),
         ("aria-label", "<input name='postcode' aria-label='Postnummer' required>", [("postcode", "Postnummer", True, "text", (), "aria-label")]),
         ("aria-labelledby", "<span id='field-label'>Ort</span><input name='location' aria-labelledby='field-label'>", [("location", "Ort", False, "text", (), "aria-labelledby")]),
-        ("placeholder", "<input name='salary' placeholder='Salary expectation'>", [("salary", "Salary expectation", False, "text", (), "placeholder")]),
+        ("placeholder", "<input name='salary' placeholder='Salary expectation' pattern='[0-9]{2,5}'>", [("salary", "Salary expectation", False, "text", (), "placeholder")]),
         ("name-fallback", "<input name='application_reference'>", [("application_reference", "application_reference", False, "text", (), "name")]),
         ("fi-file", "<label for='v'>Lataa CV</label><input id='v' name='cv_fi' type='file' accept='.pdf' required>", [("cv_fi", "Lataa CV", True, "file", (), "label")]),
         ("en-file", "<label for='v'>Upload résumé</label><input id='v' name='resume' type='file' accept='application/pdf,.pdf'>", [("resume", "Upload résumé", False, "file", (), "label")]),
@@ -535,6 +551,24 @@ def test_synthetic_finnish_swedish_english_ats_form_shape_matrix():
             for field in inspection.fields
         ]
         assert [field[1:] for field in actual_fields] == [field[1:] for field in expected_fields]
+        number_field = next(field for field in inspection.fields if field.field_id == "experience_years")
+        assert number_field.constraints == (("min", "0"), ("max", "20"), ("step", "1"))
+        pattern_field = next(field for field in inspection.fields if field.field_id == "salary")
+        assert pattern_field.constraints == (("pattern", "[0-9]{2,5}"),)
+        try:
+            agent.fill("experience_years", "21")
+        except ValueError as error:
+            assert "validation constraints" in str(error)
+        else:
+            raise AssertionError("A number outside the employer's max value must not be filled")
+        agent.fill("experience_years", "2")
+        try:
+            agent.fill("salary", "abc")
+        except ValueError as error:
+            assert "validation constraints" in str(error)
+        else:
+            raise AssertionError("An answer rejected by the employer's pattern must not be filled")
+        agent.fill("salary", "123")
         assert inspection.schema is not None
         assert not inspection.schema.single_form_context
         assert not inspection.schema.has_next_step

@@ -48,7 +48,7 @@ def _form_signature(fields: tuple[FormField, ...]) -> str:
     value = [{
         "id": f.field_id, "name": f.name, "label": f.label, "group_label": f.group_label,
         "description": f.description, "source": f.source, "required": f.required,
-        "kind": f.kind, "options": f.options, "autocomplete": f.autocomplete,
+        "kind": f.kind, "options": f.options, "autocomplete": f.autocomplete, "constraints": f.constraints,
     } for f in fields]
     return sha256(json.dumps(value, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
@@ -90,6 +90,7 @@ def _register_missing_application_questions(
             "description": field.description,
             "kind": field.kind,
             "options": field.options,
+            "constraints": dict(field.constraints),
             "required": field.required,
             "risk": classify_question(" ".join((field.group_label, field.label, field.description, field.name, field.autocomplete))),
         }

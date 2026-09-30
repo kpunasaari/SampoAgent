@@ -222,6 +222,9 @@ class PlaywrightBrowserAgent:
                     autocomplete: el.getAttribute('autocomplete') || '',
                     accept: el.getAttribute('accept') || '',
                     allowsMultipleFiles: el.type === 'file' && el.multiple,
+                    constraints: Object.fromEntries(['min', 'max', 'step', 'pattern', 'minlength', 'maxlength']
+                      .map(name => [name, el.getAttribute(name)]).filter(([, value]) => value !== null)
+                      .concat(!el.hasAttribute('min') && el.hasAttribute('value') ? [['step_base', el.getAttribute('value')]] : [])),
                     maxFileSize: el.getAttribute('data-max-file-size') || el.getAttribute('data-max-size') || '',
                     name: el.getAttribute('name') || '',
                     value: el.value || '',
@@ -246,6 +249,12 @@ class PlaywrightBrowserAgent:
                     accessible_name, label_source = "", "unlabelled"
                 required = locator.get_attribute("required") is not None or locator.get_attribute("aria-required") == "true"
                 max_file_size_raw = str(metadata.get("maxFileSize") or "")
+                constraints_data = metadata.get("constraints", {})
+                constraints = tuple(
+                    (key, str(constraints_data[key]))
+                    for key in ("min", "max", "step", "pattern", "minlength", "maxlength", "step_base")
+                    if isinstance(constraints_data, dict) and key in constraints_data
+                )
                 max_file_size = parse_file_size_limit(max_file_size_raw)
                 if max_file_size is None and re.fullmatch(r"\d+", max_file_size_raw):
                     max_file_size = int(max_file_size_raw)
@@ -253,10 +262,12 @@ class PlaywrightBrowserAgent:
                     max_file_size = parse_file_size_limit(" ".join(str(value) for value in metadata.get("describedBy", [])))
                 if input_type == "file":
                     kind = "file"
-                elif input_type in {"email", "tel", "date", "checkbox", "radio"}:
+                elif input_type in {"email", "tel", "date", "number", "checkbox", "radio"}:
                     kind = input_type
                 elif tag == "select":
                     kind = "select"
+                elif tag == "textarea":
+                    kind = "textarea"
                 else:
                     kind = "text"
                 raw_controls.append({
@@ -265,6 +276,7 @@ class PlaywrightBrowserAgent:
                     "autocomplete": str(metadata.get("autocomplete") or ""),
                     "accepted_types": tuple(value.strip().casefold() for value in str(metadata.get("accept") or "").split(",") if value.strip()),
                     "max_file_size_bytes": max_file_size,
+                    "constraints": constraints,
                     "allows_multiple_files": bool(metadata.get("allowsMultipleFiles")),
                     "accessible_name": accessible_name, "label_source": label_source,
                     "description": " ".join(dict.fromkeys(str(value).strip() for value in metadata.get("describedBy", []) if str(value).strip())),
@@ -351,6 +363,7 @@ class PlaywrightBrowserAgent:
                 accepted_types=tuple(control["accepted_types"]),
                 max_file_size_bytes=control["max_file_size_bytes"],
                 allows_multiple_files=bool(control["allows_multiple_files"]),
+                constraints=tuple(control["constraints"]),
             )
             fields.append(field)
             self._fields[field_id] = locator_value
@@ -424,6 +437,7 @@ class PlaywrightBrowserAgent:
         if locator is None or not value.strip():
             raise ValueError("Form field was not detected or answer is empty")
         kind = self._kinds[field]
+        validation_locator = locator
         if kind == "select":
             locator.select_option(label=value)
         elif kind == "radio":
@@ -431,6 +445,7 @@ class PlaywrightBrowserAgent:
             if len(matching) != 1:
                 raise ValueError("Radio answer did not match exactly one visible option")
             matching[0].check()
+            validation_locator = matching[0]
         elif kind == "checkbox":
             if value.casefold() in {"yes", "true", "1", "checked"}:
                 locator.check()
@@ -442,6 +457,10 @@ class PlaywrightBrowserAgent:
             raise ValueError("This control needs a dedicated, explicitly matched field mapping")
         else:
             locator.fill(value)
+        # Keep employer-supplied regex semantics in the browser rather than
+        # evaluating potentially pathological patterns in Python's backtracking engine.
+        if not validation_locator.evaluate("el => el.checkValidity()"):
+            raise ValueError("The answer does not satisfy the employer form's current validation constraints")
         if not hasattr(self, "_expected_step_values"):
             self._expected_step_values = {}
         self._expected_step_values[field] = value

@@ -67,11 +67,12 @@ class FormSchema:
                 "accepted_types": field.accepted_types,
                 "max_file_size_bytes": field.max_file_size_bytes,
                 "allows_multiple_files": field.allows_multiple_files,
+                "constraints": field.constraints,
             }
             for field in fields
         ]
         payload = {
-            "schema_version": "1.1",
+            "schema_version": "1.2",
             "page_origin": origin,
             "action_url": action_url,
             "navigation_checkpoint": navigation_checkpoint,
@@ -81,7 +82,7 @@ class FormSchema:
         }
         signature = sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
         return cls(
-            schema_version="1.1",
+            schema_version="1.2",
             page_url=page_url,
             page_origin=origin,
             action_url=action_url,

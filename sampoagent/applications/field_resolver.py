@@ -22,6 +22,7 @@ class FormField:
     accepted_types: tuple[str, ...] = ()
     max_file_size_bytes: int | None = None
     allows_multiple_files: bool = False
+    constraints: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)

@@ -147,3 +147,44 @@ def test_application_question_ui_escapes_prompt_and_requires_csrf_and_explicit_c
     )
     assert updated.status_code == 303
     assert repository.application_form_answers(application_id, form_signature="a" * 64, listing_hash="b" * 64) == {"shift": "Night"}
+
+
+def test_application_question_ui_preserves_employer_validation_attributes(tmp_path):
+    client = TestClient(create_app(database_path=tmp_path / "application-question-constraints.db"))
+    repository = client.app.state.repository
+    repository.load_demo()
+    application_id = repository.queue_application(1, language="en", cv_path=None)
+    repository.update_application_status(application_id, "NEEDS_USER", "A required answer is missing", queue_state="WAITING_USER")
+    repository.register_application_questions(
+        application_id,
+        form_signature="a" * 64,
+        listing_hash="b" * 64,
+        questions=[
+            {
+                "field_id": "salary", "label": "Salary expectation", "kind": "number", "options": [],
+                "constraints": {"min": "1000", "max": "5000", "step": "100"},
+                "required": True, "risk": "LOW",
+            },
+            {
+                "field_id": "employee_code", "label": "Employee code", "kind": "text", "options": [],
+                "constraints": {"pattern": "[A-Z]{2}[0-9]{4}"},
+                "required": True, "risk": "LOW",
+            },
+            {
+                "field_id": "half_step", "label": "Half-step value", "kind": "number", "options": [],
+                "constraints": {"step": "1", "step_base": "0.5"},
+                "required": True, "risk": "LOW",
+            },
+        ],
+    )
+
+    page = client.get("/applications")
+
+    assert "type='number'" in page.text
+    assert "min='1000'" in page.text
+    assert "max='5000'" in page.text
+    assert "step='100'" in page.text
+    assert "pattern='[A-Z]{2}[0-9]{4}'" in page.text
+    half_step_question = next(item for item in repository.application_questions(application_id) if item["field_id"] == "half_step")
+    half_step_control = re.search(rf"<input id='application-question-{half_step_question['id']}'[^>]*>", page.text).group(0)
+    assert "step=" not in half_step_control

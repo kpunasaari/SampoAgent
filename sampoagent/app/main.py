@@ -893,8 +893,22 @@ def create_app(
                 state = str(question.get("state", "PENDING"))
                 current_value = str(question.get("answer_value", "")) if state == "ANSWERED" else ""
                 kind = str(question.get("kind", "text"))
+                constraints = question.get("constraints", {})
+                if not isinstance(constraints, dict):
+                    constraints = {}
                 control_id = f"application-question-{int(question['id'])}"
                 label_markup = f"<label for='{control_id}'>{label}</label>"
+                try:
+                    maximum = min(4000, max(1, int(constraints.get("maxlength", 4000))))
+                except (TypeError, ValueError):
+                    maximum = 4000
+                length_attrs = f" maxlength='{maximum}'"
+                if "minlength" in constraints:
+                    try:
+                        minimum = min(4000, max(0, int(constraints["minlength"])))
+                        length_attrs = f" minlength='{minimum}'" + length_attrs
+                    except (TypeError, ValueError):
+                        pass
                 if kind in {"select", "radio"}:
                     options = question.get("options", [])
                     if not isinstance(options, list) or not options:
@@ -908,10 +922,15 @@ def create_app(
                             f"<label><input id='{control_id}-{index}' type='radio' name='value' value='{escape(str(option), quote=True)}'{' checked' if str(option) == current_value else ''} required>{escape(str(option))}</label>" for index, option in enumerate(options)
                         ) + "</fieldset>"
                 elif kind == "textarea":
-                    control = f"<textarea id='{control_id}' name='value' maxlength='4000' required>{escape(current_value)}</textarea>"
+                    control = f"<textarea id='{control_id}' name='value'{length_attrs} required>{escape(current_value)}</textarea>"
                 elif kind in {"text", "email", "tel", "number", "date"}:
                     input_type = "text" if kind == "text" else kind
-                    control = f"<input id='{control_id}' name='value' type='{input_type}' value='{escape(current_value, quote=True)}' maxlength='4000' required autocomplete='off'>"
+                    attrs = "".join(
+                        f" {key}='{escape(str(constraints[key]), quote=True)}'"
+                        for key in ("min", "max", "step", "pattern")
+                        if key in constraints and not (key == "step" and "step_base" in constraints and "min" not in constraints)
+                    )
+                    control = f"<input id='{control_id}' name='value' type='{input_type}' value='{escape(current_value, quote=True)}'{attrs}{length_attrs} required autocomplete='off'>"
                 else:
                     continue
                 question_forms.append(

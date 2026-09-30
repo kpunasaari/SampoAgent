@@ -155,6 +155,50 @@ def test_high_risk_paraphrases_are_detected_across_english_finnish_and_swedish()
         ), label
 
 
+def test_sensitive_employment_disclosures_and_screening_block_autopilot_in_all_ui_languages():
+    for label in (
+        'Have you ever been subject to disciplinary proceedings at a previous employer?',
+        'Have you ever had disciplinary action taken against you?',
+        'Have you ever been dismissed for serious misconduct?',
+        'Have you ever been terminated from a previous job?',
+        'Have you ever received a police caution?',
+        'Will you consent to a pre-employment drug test?',
+        'Are you willing to undergo an alcohol test as part of recruitment?',
+        'Oletko saanut poliisilta huomautuksen?',
+        'Onko sinuun kohdistunut kurinpitomenettely aiemmassa työpaikassa?',
+        'Onko sinut irtisanottu vakavan rikkomuksen vuoksi?',
+        'Onko sinut irtisanottu aiemmasta työpaikasta?',
+        'Suostutko työhönoton yhteydessä huumausainetestiin?',
+        'Suostutko työhönoton yhteydessä alkoholitestiin?',
+        'Har du fått en varning av polisen?',
+        'Har du varit föremål för disciplinära åtgärder hos en tidigare arbetsgivare?',
+        'Har du blivit avskedad på grund av allvarlig försummelse?',
+        'Har du blivit avskedad från ett tidigare arbete?',
+        'Samtycker du till ett drogtest före anställning?',
+        'Är du villig att genomgå ett alkoholtest som del av rekryteringen?',
+    ):
+        risk = classify_question(label)
+        assert risk == 'HIGH', label
+        assert not can_submit(
+            ApplicationMode.AUTOPILOT,
+            dry_run=False,
+            risk=risk,
+            applied_today=0,
+            daily_limit=5,
+            autopilot_authorized=True,
+            within_scope=True,
+            required_answers_resolved=True,
+            job_active=True,
+            duplicate=False,
+            paused=False,
+        ), label
+
+
+def test_role_experience_with_screenings_or_disciplinary_procedures_is_not_high_risk():
+    assert classify_question('What experience do you have conducting drug tests?') == 'MEDIUM'
+    assert classify_question('Describe your experience managing disciplinary proceedings.') == 'MEDIUM'
+
+
 def test_classifier_does_not_treat_healthcare_as_a_health_declaration():
     assert classify_question('What experience do you have in healthcare?') == 'MEDIUM'
     assert classify_question('What experience do you have as a medical assistant?') == 'MEDIUM'

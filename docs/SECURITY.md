@@ -19,16 +19,18 @@ separate job-specific confirmation rule.
 
 Application-question risk detection is deterministic phrase matching with
 English, Finnish and Swedish variants; it is not an AI decision or an exhaustive
-legal/medical classifier. Currently recognized phrases include tested examples
-from illness, criminal-history, work-authorization, identity, demographic,
+legal, medical, or employment-history classifier. Currently recognized phrases
+include tested examples from illness, criminal-history, employment-discipline/termination, police
+caution, drug/alcohol-screening, work-authorization, identity, demographic,
 privacy, assessment, accommodation and truth-declaration prompts. Only a matched
 phrase is classified as high risk; this does not mean every prompt in those
 categories is recognized. Phrase boundaries avoid treating role terms such as
-“healthcare” or “medical assistant” as personal-health disclosures. An
-unrecognized required answer independently remains unresolved and blocks form
-entry/submission. Broader ATS wording and country-specific variants still
-require staging coverage; do not treat this phrase set as universal Autopilot
-certification.
+“healthcare” or “medical assistant” as personal-health disclosures; synthetic
+role-experience prompts for drug testing and disciplinary procedures also remain
+MEDIUM. An unrecognized required answer independently remains unresolved and
+blocks form entry/submission. Broader ATS wording and country-specific variants
+still require staging coverage; do not treat this phrase set as universal
+Autopilot certification.
 
 ## Credentials and logs
 

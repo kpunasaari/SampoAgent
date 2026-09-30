@@ -24,6 +24,25 @@ def test_required_unknown_field_waits_without_asking_or_inventing():
     assert result.values == {}
 
 
+def test_application_only_answer_resolves_exact_field_but_conflicts_with_confirmed_fact():
+    field = FormField("start_date", "When can you start?", True, "date")
+    result = resolve_application_fields(
+        [field], profile={}, facts=[], answers=[], application_answers={"start_date": "2026-10-01"},
+    )
+    assert result.ready is True
+    assert result.values == {"start_date": "2026-10-01"}
+    assert result.sources == {"start_date": "APPLICATION_CONFIRMED"}
+
+    conflict = resolve_application_fields(
+        [field], profile={}, facts=[], answers=[{
+            "question": "When can you start?", "value": "2026-11-01", "category": "PREFERENCE",
+            "source": "USER_CONFIRMED", "answer_state": "CONFIRMED", "scope_type": "GLOBAL",
+        }], application_answers={"start_date": "2026-10-01"},
+    )
+    assert conflict.ready is False
+    assert conflict.conflicts == ("start_date",)
+
+
 def test_reuses_only_exact_user_confirmed_answer_and_checks_select_options():
     result = resolve_application_fields(
         [FormField("field-0", "What driving licence categories do you hold?", True, "select", ("A", "B"))],

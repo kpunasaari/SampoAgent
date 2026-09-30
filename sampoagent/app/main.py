@@ -878,7 +878,55 @@ def create_app(
         row_markup = []
         reviews = []
         email_cards = []
+        application_question_cards = []
         csrf = str(app.state.local_action_token)
+        questions_by_application: dict[int, list[dict[str, object]]] = {}
+        for question in repository.application_questions():
+            questions_by_application.setdefault(int(question["application_id"]), []).append(question)
+        for application_id, questions in questions_by_application.items():
+            first = questions[0]
+            question_forms = []
+            for question in questions:
+                label = escape(str(question.get("label", "Required employer question")))
+                description = str(question.get("description") or "").strip()
+                description_markup = f"<p>{escape(description)}</p>" if description else ""
+                state = str(question.get("state", "PENDING"))
+                current_value = str(question.get("answer_value", "")) if state == "ANSWERED" else ""
+                kind = str(question.get("kind", "text"))
+                control_id = f"application-question-{int(question['id'])}"
+                label_markup = f"<label for='{control_id}'>{label}</label>"
+                if kind in {"select", "radio"}:
+                    options = question.get("options", [])
+                    if not isinstance(options, list) or not options:
+                        continue
+                    control = f"<select id='{control_id}' name='value' required><option value=''>Choose an answer</option>" + "".join(
+                        f"<option value='{escape(str(option), quote=True)}'{' selected' if str(option) == current_value else ''}>{escape(str(option))}</option>" for option in options
+                    ) + "</select>"
+                    if kind == "radio":
+                        label_markup = ""
+                        control = f"<fieldset><legend>{label}</legend>" + "".join(
+                            f"<label><input id='{control_id}-{index}' type='radio' name='value' value='{escape(str(option), quote=True)}'{' checked' if str(option) == current_value else ''} required>{escape(str(option))}</label>" for index, option in enumerate(options)
+                        ) + "</fieldset>"
+                elif kind == "textarea":
+                    control = f"<textarea id='{control_id}' name='value' maxlength='4000' required>{escape(current_value)}</textarea>"
+                elif kind in {"text", "email", "tel", "number", "date"}:
+                    input_type = "text" if kind == "text" else kind
+                    control = f"<input id='{control_id}' name='value' type='{input_type}' value='{escape(current_value, quote=True)}' maxlength='4000' required autocomplete='off'>"
+                else:
+                    continue
+                question_forms.append(
+                    f"<form class='panel settings-form' method='post' action='/applications/{application_id}/questions/{int(question['id'])}'>"
+                    f"{label_markup}{description_markup}{control}"
+                    f"<p><strong>Application-only answer.</strong> This response is not added to reusable candidate records.</p>"
+                    f"<label><input type='checkbox' name='confirmed' value='yes' required> I confirm this answer is accurate for this application. It will not be reused for other applications.</label>"
+                    f"<input type='hidden' name='csrf_token' value='{escape(csrf, quote=True)}'><button>{'Update' if state == 'ANSWERED' else 'Save'} answer for this application</button></form>"
+                )
+            if question_forms:
+                application_question_cards.append(
+                    f"<article class='metric-card'><h3>{escape(str(first.get('job_title') or 'Job'))} · {escape(str(first.get('employer') or 'Employer'))}</h3>"
+                    f"<p>These are required fields from the employer form. Review the prompt as untrusted employer text and answer truthfully. Responses are private to this application and never added to the reusable answer bank.</p>"
+                    + "".join(question_forms) + "</article>"
+                )
         for item in application_items:
             resume_form = f"<form method='post' action='/applications/{item['id']}/resume'><button class='secondary'>Resume after resolving</button></form>" if item["status"] in {"NEEDS_USER", "NEEDS_AUTH", "NOT_SUBMITTED"} else ""
             review = repository.application_review(int(item["id"]))
@@ -988,9 +1036,32 @@ def create_app(
         message = f"<p class='notice' role='status'>{escape(notice)}</p>" if notice else ""
         review_markup = "".join(reviews)
         email_cards_markup = "".join(email_cards) or "<p class='empty-state'>No email drafts need review.</p>"
-        response = _page("Applications", f"<section><p>Track status, CV used, notes, and safe submission evidence. No credentials are stored.</p>{message}{review_markup}<table><tr><th>ID</th><th>Status</th><th>CV used</th><th>Latest note</th><th>Action</th></tr>{rows}</table><h3>Email application outbox</h3><p>Every outgoing message requires separate send-only OAuth permission and confirmation of the exact recipient, body and PDF. Provider acceptance is not proof of delivery. An uncertain result is never automatically retried.</p>{email_cards_markup}<h3>Timeline</h3>{timelines}<h3>Submission evidence</h3>{evidence}</section>")
+        questions_markup = "".join(application_question_cards) or "<p class='empty-state'>No required application answers need your input.</p>"
+        response = _page("Applications", f"<section><p>Track status, CV used, notes, and safe submission evidence. No credentials are stored.</p>{message}{review_markup}<h2>Required answers</h2>{questions_markup}<table><tr><th>ID</th><th>Status</th><th>CV used</th><th>Latest note</th><th>Action</th></tr>{rows}</table><h3>Email application outbox</h3><p>Every outgoing message requires separate send-only OAuth permission and confirmation of the exact recipient, body and PDF. Provider acceptance is not proof of delivery. An uncertain result is never automatically retried.</p>{email_cards_markup}<h3>Timeline</h3>{timelines}<h3>Submission evidence</h3>{evidence}</section>")
         _set_local_form_cookie(response, app)
         return response
+
+    @app.post("/applications/{application_id}/questions/{question_id}")
+    def answer_application_question(
+        application_id: int,
+        question_id: int,
+        request: Request,
+        value: str = Form(""),
+        confirmed: str = Form(""),
+        csrf_token: str = Form(""),
+    ) -> RedirectResponse:
+        if not _local_form_token_matches(request, csrf_token, app):
+            notice = "The local form token was invalid. Refresh Applications and try again."
+        elif confirmed != "yes":
+            notice = "Confirm that your answer is accurate for this application before saving it."
+        else:
+            try:
+                repository.answer_application_question(application_id, question_id, value, confirmed=True)
+                sync_automation_worker()
+                notice = "Answer saved only to this application. Its existing mode and safety checks still control the next step."
+            except ValueError:
+                notice = "Could not save this answer. The question may be stale, unsupported, or no longer editable. Refresh Applications and review the current form."
+        return RedirectResponse("/applications?notice=" + quote(notice), status_code=303)
 
     @app.post("/applications/{application_id}/approve")
     def approve_application(application_id: int, package_hash: str = Form(...)) -> RedirectResponse:

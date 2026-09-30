@@ -2,6 +2,7 @@
 
 from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from email.utils import parseaddr
 from hashlib import sha256
 from pathlib import Path
@@ -41,6 +42,8 @@ _SAFE_ACTIVITY_ACTIONS = frozenset({
 })
 _SAFE_ACTIVITY_DETAIL = "Activity details omitted to protect privacy."
 _AUTOPILOT_POLICY_VERSION = "stepwise-form-save-v1"
+_APPLICATION_ANSWER_KINDS = frozenset({"text", "textarea", "email", "tel", "number", "date", "select", "radio"})
+_APPLICATION_ANSWER_SECRETS = ("password", "passwd", "access token", "api key", "secret=")
 
 
 def _split_candidate_values(value: str) -> list[str]:
@@ -99,6 +102,7 @@ class Repository:
             CREATE TABLE IF NOT EXISTS job_overrides (job_id INTEGER PRIMARY KEY, decision TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, FOREIGN KEY(job_id) REFERENCES jobs(id));
             CREATE TABLE IF NOT EXISTS applications (id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL, status TEXT NOT NULL, queue_state TEXT NOT NULL, language TEXT NOT NULL, cv_path TEXT, notes TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(job_id) REFERENCES jobs(id));
             CREATE TABLE IF NOT EXISTS application_reviews (application_id INTEGER PRIMARY KEY, package_hash TEXT NOT NULL, package_json TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('WAITING','APPROVED')), created_at TEXT NOT NULL, approved_at TEXT, FOREIGN KEY(application_id) REFERENCES applications(id) ON DELETE CASCADE);
+            CREATE TABLE IF NOT EXISTS application_form_answers (id INTEGER PRIMARY KEY, application_id INTEGER NOT NULL, field_id TEXT NOT NULL, form_signature TEXT NOT NULL, listing_hash TEXT NOT NULL, label TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL, options_json TEXT NOT NULL DEFAULT '[]', required INTEGER NOT NULL DEFAULT 1, risk TEXT NOT NULL CHECK(risk IN ('LOW','MEDIUM')), state TEXT NOT NULL DEFAULT 'PENDING' CHECK(state IN ('PENDING','ANSWERED','STALE')), answer_value TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, answered_at TEXT, UNIQUE(application_id, form_signature, listing_hash, field_id), FOREIGN KEY(application_id) REFERENCES applications(id) ON DELETE CASCADE);
             CREATE TABLE IF NOT EXISTS submission_evidence (id INTEGER PRIMARY KEY, application_id INTEGER NOT NULL, final_url TEXT NOT NULL, confirmation_message TEXT NOT NULL, confirmation_id TEXT, agent_provider TEXT NOT NULL, created_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS answer_bank (id INTEGER PRIMARY KEY, category TEXT NOT NULL, question TEXT NOT NULL, value TEXT NOT NULL, source TEXT NOT NULL, created_at TEXT NOT NULL, question_id TEXT NOT NULL DEFAULT '', answer_state TEXT NOT NULL DEFAULT 'DRAFT', value_type TEXT NOT NULL DEFAULT 'text', sensitivity TEXT NOT NULL DEFAULT 'NORMAL', scope_type TEXT NOT NULL DEFAULT 'GLOBAL', scope_country TEXT NOT NULL DEFAULT '', scope_employer TEXT NOT NULL DEFAULT '', valid_until TEXT, confirmed_at TEXT, source_ref TEXT NOT NULL DEFAULT '');
             CREATE TABLE IF NOT EXISTS application_timeline (id INTEGER PRIMARY KEY, application_id INTEGER NOT NULL, status TEXT NOT NULL, note TEXT NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY(application_id) REFERENCES applications(id));
@@ -2380,6 +2384,194 @@ class Repository:
         self.revoke_autopilot("Application answers changed")
         self.connection.commit()
         return int(cursor.lastrowid)
+
+    def register_application_questions(
+        self,
+        application_id: int,
+        *,
+        form_signature: str,
+        listing_hash: str,
+        questions: list[dict[str, object]],
+    ) -> int:
+        """Persist only safe, required, application-local fields awaiting the candidate."""
+        if not re.fullmatch(r"[0-9a-f]{64}", form_signature) or not re.fullmatch(r"[0-9a-f]{64}", listing_hash):
+            raise ValueError("Application question context is invalid")
+        if not self.application(application_id):
+            raise ValueError("Application question target was not found")
+        eligible: list[dict[str, object]] = []
+        for question in questions:
+            field_id = str(question.get("field_id", "")).strip()
+            label = " ".join(str(question.get("label", "")).split())
+            description = " ".join(str(question.get("description", "")).split())
+            kind = str(question.get("kind", ""))
+            risk = str(question.get("risk", ""))
+            if not field_id or len(field_id) > 200 or not label or len(label) > 1000:
+                continue
+            if kind not in _APPLICATION_ANSWER_KINDS or risk not in {"LOW", "MEDIUM"} or not question.get("required"):
+                continue
+            options_raw = question.get("options", ())
+            options = [str(option).strip() for option in options_raw if str(option).strip()] if isinstance(options_raw, (tuple, list)) else []
+            if kind in {"select", "radio"} and (not options or len(options) > 100 or any(len(option) > 500 for option in options)):
+                continue
+            eligible.append({
+                "field_id": field_id, "label": label, "description": description[:2000],
+                "kind": kind, "risk": risk, "options": options,
+            })
+        now = datetime.now(timezone.utc).isoformat()
+        inserted = 0
+        with self.connection:
+            # A question that was still unanswered on an older page/schema must not
+            # remain actionable after the live form changes. Answered earlier steps
+            # remain bound to their own signatures for multi-step forms.
+            self.connection.execute(
+                "UPDATE application_form_answers SET state='STALE' WHERE application_id=? "
+                "AND state='PENDING' AND (form_signature!=? OR listing_hash!=?)",
+                (application_id, form_signature, listing_hash),
+            )
+            if self.connection.execute(
+                "SELECT 1 FROM application_form_answers WHERE application_id=? AND listing_hash!=? LIMIT 1",
+                (application_id, listing_hash),
+            ).fetchone():
+                self.connection.execute(
+                    "UPDATE application_form_answers SET state='STALE' WHERE application_id=? AND listing_hash!=?",
+                    (application_id, listing_hash),
+                )
+            eligible_ids = [str(item["field_id"]) for item in eligible]
+            if eligible_ids:
+                placeholders = ",".join("?" for _ in eligible_ids)
+                self.connection.execute(
+                    f"UPDATE application_form_answers SET state='STALE' WHERE application_id=? AND form_signature=? AND listing_hash=? "
+                    f"AND state='PENDING' AND field_id NOT IN ({placeholders})",
+                    (application_id, form_signature, listing_hash, *eligible_ids),
+                )
+            else:
+                self.connection.execute(
+                    "UPDATE application_form_answers SET state='STALE' WHERE application_id=? AND form_signature=? AND listing_hash=? AND state='PENDING'",
+                    (application_id, form_signature, listing_hash),
+                )
+            for question in eligible:
+                field_id = str(question["field_id"])
+                label = str(question["label"])
+                description = str(question["description"])
+                kind = str(question["kind"])
+                risk = str(question["risk"])
+                options = question["options"]
+                self.connection.execute(
+                    "INSERT INTO application_form_answers(application_id,field_id,form_signature,listing_hash,label,description,kind,options_json,required,risk,state,created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,1,?,'PENDING',?) "
+                    "ON CONFLICT(application_id,form_signature,listing_hash,field_id) DO UPDATE SET "
+                    "label=excluded.label,description=excluded.description,kind=excluded.kind,options_json=excluded.options_json,risk=excluded.risk "
+                    "WHERE application_form_answers.state='PENDING'",
+                    (application_id, field_id, form_signature, listing_hash, label, description[:2000], kind, json.dumps(options, ensure_ascii=False), risk, now),
+                )
+                inserted += int(self.connection.execute("SELECT changes()").fetchone()[0] > 0)
+        return inserted
+
+    def application_questions(self, application_id: int | None = None) -> list[dict[str, object]]:
+        if application_id is None:
+            rows = self.connection.execute(
+                "SELECT q.*, a.status AS application_status, a.queue_state, j.title AS job_title, j.company AS employer "
+                "FROM application_form_answers q JOIN applications a ON a.id=q.application_id JOIN jobs j ON j.id=a.job_id "
+                "WHERE q.state IN ('PENDING','ANSWERED') AND a.status IN ('NEEDS_USER','QUEUED') "
+                "AND a.queue_state IN ('WAITING_USER','READY') ORDER BY q.created_at,q.id"
+            ).fetchall()
+        else:
+            rows = self.connection.execute(
+                "SELECT q.*, a.status AS application_status, a.queue_state, j.title AS job_title, j.company AS employer "
+                "FROM application_form_answers q JOIN applications a ON a.id=q.application_id JOIN jobs j ON j.id=a.job_id "
+                "WHERE q.application_id=? AND q.state IN ('PENDING','ANSWERED') "
+                "AND a.status IN ('NEEDS_USER','QUEUED') AND a.queue_state IN ('WAITING_USER','READY') "
+                "ORDER BY q.created_at,q.id",
+                (application_id,),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["options"] = json.loads(str(item.pop("options_json", "[]")))
+            except (TypeError, ValueError):
+                item["options"] = []
+            result.append(item)
+        return result
+
+    def answer_application_question(self, application_id: int, question_id: int, value: str, *, confirmed: bool) -> None:
+        raw_value = value if isinstance(value, str) else ""
+        if confirmed is not True or not raw_value.strip() or len(raw_value) > 4000:
+            raise ValueError("A confirmed, non-empty application answer is required")
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.connection.execute(
+                "SELECT q.*,a.status AS application_status,a.queue_state FROM application_form_answers q "
+                "JOIN applications a ON a.id=q.application_id WHERE q.id=? AND q.application_id=?",
+                (question_id, application_id),
+            ).fetchone()
+            if not row or row["state"] not in {"PENDING", "ANSWERED"}:
+                raise ValueError("Application question is no longer current")
+            if row["application_status"] not in {"NEEDS_USER", "QUEUED"} or row["queue_state"] not in {"WAITING_USER", "READY"}:
+                raise ValueError("Application is already being processed or is no longer editable")
+            clean_value = raw_value.strip() if row["kind"] == "textarea" else " ".join(raw_value.split())
+            if not clean_value:
+                raise ValueError("A non-empty application answer is required")
+            if any(secret in clean_value.casefold() for secret in _APPLICATION_ANSWER_SECRETS):
+                raise ValueError("Credential-like values cannot be stored as application answers")
+            if row["kind"] in {"select", "radio"}:
+                options = json.loads(str(row["options_json"]))
+                if clean_value not in options:
+                    raise ValueError("Choose one of the saved employer form options")
+            if row["kind"] == "date":
+                date.fromisoformat(clean_value)
+            if row["kind"] == "email":
+                parsed_email = parseaddr(clean_value)[1]
+                if parsed_email != clean_value or clean_value.count("@") != 1 or any(char.isspace() for char in clean_value):
+                    raise ValueError("Enter a valid email address")
+            if row["kind"] == "number":
+                try:
+                    if not Decimal(clean_value).is_finite():
+                        raise ValueError("Enter a finite number")
+                except InvalidOperation as error:
+                    raise ValueError("Enter a valid number") from error
+            now = datetime.now(timezone.utc).isoformat()
+            self.connection.execute(
+                "UPDATE application_form_answers SET state='ANSWERED',answer_value=?,answered_at=? WHERE id=?",
+                (clean_value, now, question_id),
+            )
+            remaining = int(self.connection.execute(
+                "SELECT COUNT(*) FROM application_form_answers WHERE application_id=? AND state='PENDING'",
+                (application_id,),
+            ).fetchone()[0])
+            if remaining == 0 and row["application_status"] == "NEEDS_USER":
+                self.connection.execute(
+                    "UPDATE applications SET status='QUEUED',queue_state='READY',notes='Candidate supplied application-specific required answers; the worker will recheck the live form.',updated_at=? WHERE id=?",
+                    (now, application_id),
+                )
+                self.connection.execute(
+                    "INSERT INTO application_timeline(application_id,status,note,created_at) VALUES (?,'QUEUED','Candidate supplied required application-specific answers; worker will recheck the live form',?)",
+                    (application_id, now),
+                )
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
+
+    def application_form_answers(self, application_id: int, *, form_signature: str, listing_hash: str) -> dict[str, str]:
+        rows = self.connection.execute(
+            "SELECT field_id,answer_value FROM application_form_answers WHERE application_id=? "
+            "AND form_signature=? AND listing_hash=? AND state='ANSWERED' ORDER BY id",
+            (application_id, form_signature, listing_hash),
+        ).fetchall()
+        return {str(row["field_id"]): str(row["answer_value"]) for row in rows}
+
+    def application_context_fingerprint(self, application_id: int) -> str:
+        rows = self.connection.execute(
+            "SELECT field_id,form_signature,listing_hash,state,answer_value FROM application_form_answers "
+            "WHERE application_id=? AND state='ANSWERED' ORDER BY id",
+            (application_id,),
+        ).fetchall()
+        context = {
+            "scope": self.automation_scope_fingerprint(),
+            "application_answers": [tuple(row) for row in rows],
+        }
+        return sha256(json.dumps(context, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
     def confirm_onboarding_answers(self, answers: list[AnswerConfirmation]) -> int:
         """Version explicitly reviewed answers and retain their exact scope and freshness."""

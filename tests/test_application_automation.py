@@ -283,6 +283,60 @@ def test_unknown_required_form_field_stops_without_submission(tmp_path):
     assert result == "NEEDS_USER"
     assert browser.submitted == 0
     assert repository.application(application_id)["queue_state"] == "WAITING_USER"
+    assert len(repository.application_questions(application_id)) == 1
+    repository.connection.close()
+
+
+def test_autopilot_resumes_after_application_only_required_answer_without_reusing_it(tmp_path):
+    repository, application_id = _authorized_repository(tmp_path)
+    fields = _basic_fields() + [FormField("start_date", "When can you start?", True, kind="date")]
+
+    first_result = process_application(repository, application_id, FakeBrowser(fields))
+
+    assert first_result == "NEEDS_USER"
+    question = repository.application_questions(application_id)[0]
+    assert question["field_id"] == "start_date"
+    assert repository.application_form_answers(
+        application_id, form_signature=question["form_signature"], listing_hash=question["listing_hash"],
+    ) == {}
+    answers_before = repository.answers()
+    facts_before = repository.rows("facts")
+    repository.answer_application_question(application_id, int(question["id"]), "2026-10-01", confirmed=True)
+    assert repository.answers() == answers_before
+    assert repository.rows("facts") == facts_before
+
+    browser = FakeBrowser(fields)
+    second_result = process_application(repository, application_id, browser)
+
+    assert second_result == "APPLIED"
+    assert browser.filled == {"name": "Aino Example", "email": "aino@example.test", "start_date": "2026-10-01"}
+    assert browser.submitted == 1
+    repository.connection.close()
+
+
+def test_multistep_autopilot_resolves_answer_only_on_matching_form_step(tmp_path):
+    repository, application_id = _authorized_repository(tmp_path)
+    steps = (
+        _step_inspection([FormField("shift", "Which shift can you work?", True, "select", ("Day", "Night"))], 1, has_next=True),
+        _step_inspection(_basic_fields(), 2, has_next=False),
+    )
+    first_browser = MultiStepFakeBrowser(steps)
+
+    first_result = process_application(repository, application_id, first_browser)
+
+    assert first_result == "NEEDS_USER"
+    assert first_browser.filled == {}
+    question = repository.application_questions(application_id)[0]
+    assert len(str(question["form_signature"])) == 64
+    repository.answer_application_question(application_id, int(question["id"]), "Night", confirmed=True)
+
+    resumed_browser = MultiStepFakeBrowser(steps)
+    resumed_result = process_application(repository, application_id, resumed_browser)
+
+    assert resumed_result == "APPLIED"
+    assert resumed_browser.filled["shift"] == "Night"
+    assert resumed_browser.advance_calls == 1
+    assert resumed_browser.submitted == 1
     repository.connection.close()
 
 
@@ -371,6 +425,7 @@ def test_multistep_high_risk_later_page_stops_before_filling_that_page(tmp_path)
     assert browser.advance_calls == 1
     assert browser.submitted == 0
     assert "high-risk" in repository.application(application_id)["notes"].casefold()
+    assert repository.application_questions(application_id) == []
     repository.connection.close()
 
 

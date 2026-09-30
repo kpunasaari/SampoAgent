@@ -53,6 +53,57 @@ def _form_signature(fields: tuple[FormField, ...]) -> str:
     return sha256(json.dumps(value, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
 
+def _inspection_signature(inspection: FormInspection) -> str:
+    semantic = inspection.schema.signature if inspection.schema else _form_signature(tuple(inspection.fields))
+    if inspection.signature and inspection.signature != semantic:
+        return sha256(json.dumps({"adapter": inspection.signature, "semantic": semantic}, sort_keys=True).encode()).hexdigest()
+    return semantic
+
+
+def _browser_signature(inspection: FormInspection) -> str:
+    """Keep the adapter's own opaque signature for browser-side readback gates."""
+    return inspection.signature or _form_signature(tuple(inspection.fields))
+
+
+def _application_answers(repository: object, application_id: int, job: dict[str, object], inspection: FormInspection) -> dict[str, str]:
+    return repository.application_form_answers(
+        application_id,
+        form_signature=_inspection_signature(inspection),
+        listing_hash=job_snapshot_hash(job),
+    )
+
+
+def _register_missing_application_questions(
+    repository: object,
+    application_id: int,
+    job: dict[str, object],
+    inspection: FormInspection,
+    *,
+    needs_input: tuple[str, ...],
+    conflicts: tuple[str, ...],
+) -> None:
+    missing = set(needs_input) if not conflicts else set()
+    questions = [
+        {
+            "field_id": field.field_id,
+            "label": field.label,
+            "description": field.description,
+            "kind": field.kind,
+            "options": field.options,
+            "required": field.required,
+            "risk": classify_question(" ".join((field.group_label, field.label, field.description, field.name, field.autocomplete))),
+        }
+        for field in inspection.fields
+        if field.field_id in missing
+    ]
+    repository.register_application_questions(
+        application_id,
+        form_signature=_inspection_signature(inspection),
+        listing_hash=job_snapshot_hash(job),
+        questions=questions,
+    )
+
+
 def _matches_autopilot_role_scope(repository: object, job: dict[str, object]) -> bool:
     preferences = repository.preferences()
     source_id = job.get("source_id")
@@ -171,7 +222,7 @@ def _process_multistep_application(
             return "CAPTCHA_HOLD"
         if current.authentication_required:
             return _wait_for_user(repository, application_id, "NEEDS_AUTH", "Sign in to the employer site in the saved local browser session, then resume this application.")
-        if repository.automation_scope_fingerprint() != submission_context_fingerprint:
+        if repository.application_context_fingerprint(application_id) != submission_context_fingerprint:
             return _wait_for_user(repository, application_id, "NEEDS_USER", "Candidate information or application scope changed between application pages; review before resuming.")
         if not is_same_public_origin(application_url, current.final_url):
             return _wait_for_user(repository, application_id, "NEEDS_USER", "The application changed origin; no further form data was entered.")
@@ -229,9 +280,14 @@ def _process_multistep_application(
             profile=repository.profile() or {},
             facts=repository.rows("facts"),
             answers=repository.answers(),
+            application_answers=_application_answers(repository, application_id, current_job, current),
             records={kind: repository.candidate_records(kind) for kind in ("experience", "education", "certificate", "licence", "language", "availability", "preference")},
             country=str(current_job.get("country") or ""),
             employer=str(current_job.get("company") or ""),
+        )
+        _register_missing_application_questions(
+            repository, application_id, current_job, current,
+            needs_input=resolution.needs_input, conflicts=resolution.conflicts,
         )
         if not resolution.ready:
             identifiers = (*resolution.needs_input, *resolution.conflicts)
@@ -287,7 +343,7 @@ def _process_multistep_application(
 
         try:
             for field in regular_fields:
-                if repository.automation_scope_fingerprint() != submission_context_fingerprint:
+                if repository.application_context_fingerprint(application_id) != submission_context_fingerprint:
                     return _wait_for_user(repository, application_id, "NEEDS_USER", "Candidate information changed before this page was filled.")
                 application = repository.application(application_id)
                 current_job = repository.job(int(application["job_id"])) if application else None
@@ -310,7 +366,7 @@ def _process_multistep_application(
                 if value is not None:
                     browser.fill(field.field_id, value)
             if selected_upload is not None:
-                if repository.automation_scope_fingerprint() != submission_context_fingerprint:
+                if repository.application_context_fingerprint(application_id) != submission_context_fingerprint:
                     return _wait_for_user(repository, application_id, "NEEDS_USER", "Candidate information changed before the CV upload.")
                 application = repository.application(application_id)
                 current_job = repository.job(int(application["job_id"])) if application else None
@@ -388,7 +444,7 @@ def _process_multistep_application(
             current_application = repository.application(application_id)
             current_job = repository.job(int(current_application["job_id"])) if current_application else None
             if (
-                repository.automation_scope_fingerprint() != submission_context_fingerprint
+                repository.application_context_fingerprint(application_id) != submission_context_fingerprint
                 or not current_application
                 or current_application.get("status") != "QUEUED"
                 or current_application.get("queue_state") != "PREPARING"
@@ -428,7 +484,7 @@ def _process_multistep_application(
         or not repository.owns_application_preparation(application_id, owner_token=preparation_token)
     ):
         return "BLOCKED"
-    if repository.automation_scope_fingerprint() != submission_context_fingerprint:
+    if repository.application_context_fingerprint(application_id) != submission_context_fingerprint:
         return _wait_for_user(repository, application_id, "NEEDS_USER", "Candidate information or application scope changed before final submission.")
     manifest_signature = sha256(json.dumps(pages, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
     package = {
@@ -464,7 +520,7 @@ def _process_multistep_application(
             or current_application.get("status") != "SUBMITTING"
             or current_application.get("queue_state") != "SUBMITTING"
             or not repository.submission_attempt_is_active(application_id, attempt_id, package_hash=package_hash)
-            or repository.automation_scope_fingerprint() != submission_context_fingerprint
+            or repository.application_context_fingerprint(application_id) != submission_context_fingerprint
         ):
             pre_click_block.append("BLOCKED")
             return False
@@ -545,7 +601,7 @@ def _process_claimed_application(repository: object, application_id: int, browse
     )
     if initial_policy:
         return initial_policy
-    submission_context_fingerprint = repository.automation_scope_fingerprint()
+    submission_context_fingerprint = repository.application_context_fingerprint(application_id)
 
     application_url = str(job.get("application_url", ""))
     try:
@@ -558,7 +614,7 @@ def _process_claimed_application(repository: object, application_id: int, browse
         return "CAPTCHA_HOLD"
     if inspection.authentication_required:
         return _wait_for_user(repository, application_id, "NEEDS_AUTH", "Sign in to the employer site in the saved local browser session, then resume this application.")
-    if repository.automation_scope_fingerprint() != submission_context_fingerprint:
+    if repository.application_context_fingerprint(application_id) != submission_context_fingerprint:
         return _wait_for_user(
             repository,
             application_id,
@@ -611,9 +667,14 @@ def _process_claimed_application(repository: object, application_id: int, browse
         profile=repository.profile() or {},
         facts=repository.rows("facts"),
         answers=repository.answers(),
+        application_answers=_application_answers(repository, application_id, job, inspection),
         records={kind: repository.candidate_records(kind) for kind in ("experience", "education", "certificate", "licence", "language", "availability", "preference")},
         country=str(job.get("country") or ""),
         employer=str(job.get("company") or ""),
+    )
+    _register_missing_application_questions(
+        repository, application_id, job, inspection,
+        needs_input=resolution.needs_input, conflicts=resolution.conflicts,
     )
     if not resolution.ready:
         identifiers = (*resolution.needs_input, *resolution.conflicts)
@@ -672,7 +733,7 @@ def _process_claimed_application(repository: object, application_id: int, browse
             "The employer page already contains an attachment that is not part of the selected application package.",
         )
 
-    before_signature = inspection.signature or _form_signature(inspection.fields)
+    before_signature = _browser_signature(inspection)
     current_job = repository.job(int(application["job_id"]))
     current_application = repository.application(application_id)
     if not current_job or not current_application or current_application.get("status") != "QUEUED" or current_application.get("queue_state") != "PREPARING" or not repository.owns_application_preparation(application_id, owner_token=preparation_token):
@@ -750,7 +811,7 @@ def _process_claimed_application(repository: object, application_id: int, browse
 
     try:
         for field in regular_fields:
-            if repository.automation_scope_fingerprint() != submission_context_fingerprint:
+            if repository.application_context_fingerprint(application_id) != submission_context_fingerprint:
                 return _wait_for_user(
                     repository,
                     application_id,
@@ -761,7 +822,7 @@ def _process_claimed_application(repository: object, application_id: int, browse
             if value is not None:
                 browser.fill(field.field_id, value)
         if selected_upload is not None:
-            if repository.automation_scope_fingerprint() != submission_context_fingerprint:
+            if repository.application_context_fingerprint(application_id) != submission_context_fingerprint:
                 return _wait_for_user(
                     repository,
                     application_id,
@@ -794,7 +855,7 @@ def _process_claimed_application(repository: object, application_id: int, browse
         return _wait_for_user(repository, application_id, "NEEDS_USER", "The browser could not verify the prepared values in fields: " + ", ".join(mismatched_fields))
     if not after_fill.submit_control_ready:
         return _wait_for_user(repository, application_id, "NEEDS_USER", "The form no longer has a unique application submit control.")
-    after_signature = after_fill.signature or _form_signature(after_fill.fields)
+    after_signature = _browser_signature(after_fill)
     if before_signature != after_signature:
         return _wait_for_user(repository, application_id, "NEEDS_USER", "The form changed after values were entered; review the new questions.")
 
@@ -867,7 +928,7 @@ def _process_claimed_application(repository: object, application_id: int, browse
         ):
             pre_click_block.append("BLOCKED")
             return False
-        if repository.automation_scope_fingerprint() != submission_context_fingerprint:
+        if repository.application_context_fingerprint(application_id) != submission_context_fingerprint:
             pre_click_block.append("BLOCKED")
             return False
         try:

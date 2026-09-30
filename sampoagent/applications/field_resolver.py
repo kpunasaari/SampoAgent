@@ -230,6 +230,7 @@ def resolve_application_fields(
     profile: Mapping[str, object],
     facts: Sequence[Mapping[str, object]],
     answers: Sequence[Mapping[str, object]],
+    application_answers: Mapping[str, str] | None = None,
     records: Mapping[str, Sequence[Mapping[str, object]]] | None = None,
     country: str = "",
     employer: str = "",
@@ -249,6 +250,9 @@ def resolve_application_fields(
             candidates.append(profile_value)
         candidates.extend(_known_facts(field, facts, records or {}))
         candidates.extend(_confirmed_answers(field, answers, country=country, employer=employer))
+        application_value = str((application_answers or {}).get(field.field_id, "")).strip()
+        if application_value:
+            candidates.append((application_value, "APPLICATION_CONFIRMED"))
         distinct: dict[str, tuple[str, str]] = {_key(value): (value, source) for value, source in candidates}
         if len(distinct) > 1:
             conflicts.append(field.field_id)

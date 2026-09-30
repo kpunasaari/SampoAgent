@@ -1,4 +1,5 @@
 from fastapi.testclient import TestClient
+import re
 
 from sampoagent.app.main import create_app
 
@@ -92,3 +93,57 @@ def test_conflicting_candidate_answer_status_links_to_both_provenance_reviews(tm
     assert "href='/profile'" in response.text
     assert "Review questionnaire answers" in response.text
     assert "href='/answers'" in response.text
+
+
+def test_application_question_ui_escapes_prompt_and_requires_csrf_and_explicit_confirmation(tmp_path):
+    client = TestClient(create_app(database_path=tmp_path / "application-question-ui.db"), follow_redirects=False)
+    repository = client.app.state.repository
+    repository.load_demo()
+    application_id = repository.queue_application(1, language="en", cv_path=None)
+    repository.update_application_status(application_id, "NEEDS_USER", "A required answer is missing", queue_state="WAITING_USER")
+    repository.register_application_questions(
+        application_id,
+        form_signature="a" * 64,
+        listing_hash="b" * 64,
+        questions=[{
+            "field_id": "shift", "label": "<img src=x onerror=alert(1)> Which shift?", "description": "Select a shift.",
+            "kind": "select", "options": ["Day", "Night"], "required": True, "risk": "LOW",
+        }],
+    )
+
+    page = client.get("/applications")
+    assert "&lt;img src=x onerror=alert(1)&gt;" in page.text
+    assert "application-only" in page.text.casefold()
+    assert "Day" in page.text and "Night" in page.text
+    csrf = re.search(r"name='csrf_token' value='([a-f0-9]+)'", page.text).group(1)
+
+    denied = client.post(
+        f"/applications/{application_id}/questions/1",
+        data={"value": "Day", "confirmed": "yes", "csrf_token": "invalid"},
+    )
+    assert denied.status_code == 303
+    assert repository.application_form_answers(application_id, form_signature="a" * 64, listing_hash="b" * 64) == {}
+
+    unconfirmed = client.post(
+        f"/applications/{application_id}/questions/1",
+        data={"value": "Day", "csrf_token": csrf},
+    )
+    assert unconfirmed.status_code == 303
+    assert repository.application_form_answers(application_id, form_signature="a" * 64, listing_hash="b" * 64) == {}
+
+    saved = client.post(
+        f"/applications/{application_id}/questions/1",
+        data={"value": "Day", "confirmed": "yes", "csrf_token": csrf},
+    )
+    assert saved.status_code == 303
+    assert repository.application_form_answers(application_id, form_signature="a" * 64, listing_hash="b" * 64) == {"shift": "Day"}
+    assert repository.application(application_id)["queue_state"] == "READY"
+
+    answered_page = client.get("/applications")
+    assert "value='Day' selected" in answered_page.text
+    updated = client.post(
+        f"/applications/{application_id}/questions/1",
+        data={"value": "Night", "confirmed": "yes", "csrf_token": csrf},
+    )
+    assert updated.status_code == 303
+    assert repository.application_form_answers(application_id, form_signature="a" * 64, listing_hash="b" * 64) == {"shift": "Night"}

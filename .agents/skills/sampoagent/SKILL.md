@@ -15,6 +15,7 @@ Help the user find suitable openings and prepare accurate applications while kee
 - Prefer current user-confirmed facts where records conflict. Point out material conflicts and ask which is correct; do not silently resolve them.
 - Never invent or infer personal claims such as work dates, qualifications, language level, work authorization, salary history, references, licences, availability, or eligibility answers. AI-inferred or unconfirmed CV-extracted facts are not confirmed facts.
 - When a required fact is absent, ambiguous, or contradictory, pause that field and ask the user. Keep application questions together where practical.
+- In SampoAgent's local Full Autopilot flow, a required LOW/MEDIUM scalar field with a visible prompt may instead be answered in the Applications screen. The user must explicitly confirm it; the answer is bound to that application and exact form/listing snapshot and must never be copied into the global answer bank, candidate facts, another application, or a CV. A changed form/listing requires a fresh answer. High-risk, conflicting, optional, unsupported, CAPTCHA, authentication, or access-control cases remain manual.
 
 ## Discover and assess jobs
 
@@ -31,6 +32,7 @@ Help the user find suitable openings and prepare accurate applications while kee
 - For a browser form, inspect each label and enter only supported values. Pause for missing facts and for sensitive or high-impact questions, including eligibility/work authorization, sponsorship, salary, notice period, availability, criminal/background disclosures, health/disability, demographic questions, legal declarations, and consent.
 - Login, identity checks, one-time codes, CAPTCHA, and access denials are user actions. Do not request passwords or codes in chat or attempt to bypass a control. Save a draft only when the site supports it and confirm the saved state.
 - Before any final Submit/Apply/Send action, show the exact job and a concise review of material answers, documents, and declarations. Submit only after the user explicitly confirms that specific application. General prior permission to apply is not confirmation for a particular submission.
+- The local app's separate Full Autopilot grant may submit only within its current verified scope and supported application path; it is not authority for Codex to click Submit on the user's behalf. Codex-assisted final submissions still require confirmation for that specific application.
 - After submission, verify the confirmation state and report it accurately. If not submitted, say what remains and provide the official link.
 
 ## Track outcomes

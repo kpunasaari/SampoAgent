@@ -218,7 +218,8 @@ def generate_cv_pdf(
 def check_pdf_text(path: Path, *, required: list[str]) -> PDFTextCheck:
     """Check whether expected phrases appear in text parsed from a PDF."""
     text = "\n".join(page.extract_text() or "" for page in PdfReader(str(path)).pages)
-    missing = [item for item in required if item not in text]
+    normalized_text = " ".join(text.split())
+    missing = [item for item in required if " ".join(item.split()) not in normalized_text]
     score = round((len(required) - len(missing)) / len(required) * 100) if required else 100
     return PDFTextCheck(not missing, score, text, missing)
 

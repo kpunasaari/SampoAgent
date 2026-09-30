@@ -1557,22 +1557,30 @@ class Repository:
     def finish_captcha_task(self, task_id: int, *, outcome: str, confirmation_message: str = "") -> None:
         if outcome not in {"submitted", "not_submitted", "skip"}:
             raise ValueError("Unsupported CAPTCHA task outcome")
-        task = self.connection.execute("SELECT application_id, detected_url, state FROM captcha_tasks WHERE id=?", (task_id,)).fetchone()
-        if not task or task["state"] != "IN_PROGRESS":
-            raise ValueError("CAPTCHA task is not active")
         if outcome == "submitted" and not confirmation_message.strip():
             raise ValueError("Record the employer confirmation before marking submitted")
         if outcome == "submitted" and any(secret in confirmation_message.casefold() for secret in ("password", "access token", "secret=")):
             raise ValueError("Confirmation must not contain credentials")
         now = datetime.now(timezone.utc).isoformat()
         final_status = {"submitted": "APPLIED_MANUAL", "not_submitted": "NOT_SUBMITTED", "skip": "WITHDRAWN"}[outcome]
-        with self.connection:
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            task = self.connection.execute(
+                "SELECT application_id, detected_url, state FROM captcha_tasks WHERE id=?",
+                (task_id,),
+            ).fetchone()
+            if not task or task["state"] != "IN_PROGRESS":
+                raise ValueError("CAPTCHA task is not active")
             self.connection.execute("UPDATE captcha_tasks SET state='COMPLETED', outcome=?, finished_at=? WHERE id=?", (outcome, now, task_id))
             self.connection.execute("UPDATE applications SET status=?, queue_state='COMPLETED', updated_at=? WHERE id=?", (final_status, now, int(task["application_id"])))
             self.connection.execute("INSERT INTO application_timeline(application_id, status, note, created_at) VALUES (?, ?, ?, ?)", (int(task["application_id"]), final_status, "Candidate completed the CAPTCHA step manually" + (": " + confirmation_message.strip()[:300] if outcome == "submitted" else ""), now))
             if outcome == "submitted":
                 self.connection.execute("INSERT INTO submission_evidence(application_id, final_url, confirmation_message, confirmation_id, agent_provider, created_at) VALUES (?, ?, ?, NULL, 'manual_captcha', ?)", (int(task["application_id"]), str(task["detected_url"]), confirmation_message.strip()[:300], now))
             self.log("captcha_task_completed", f"{int(task['application_id'])}: {outcome}")
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
 
     def archive_cv(self, *, path: str, checksum: str, language: str, role_family: str, source_job_id: int | None, fit_score: int, strategy: str, ats_score: int = 0) -> None:
         if language not in {"fi", "en", "unknown"} or not 0 <= fit_score <= 100 or not 0 <= ats_score <= 100 or strategy not in {"uploaded", "generated", "reused"}:

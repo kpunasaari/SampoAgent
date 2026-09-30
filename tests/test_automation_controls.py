@@ -128,6 +128,59 @@ def test_captcha_tasks_accumulate_and_are_handled_one_at_a_time():
     repository.connection.close()
 
 
+def test_concurrent_captcha_completion_records_one_terminal_outcome_and_one_receipt(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    database_path = tmp_path / "captcha-race.db"
+    repository = Repository(database_path)
+    repository.initialize()
+    repository.load_demo()
+    application_id = repository.queue_application(1, language="en", cv_path=None)
+    task_id = repository.hold_for_captcha(
+        application_id, detected_url="https://careers.example.fi/apply/1",
+    )
+    repository.begin_captcha_task(task_id)
+    competing_repository = Repository(database_path)
+    transaction_barrier = Barrier(2)
+
+    def synchronize_completion_transaction(connection):
+        state = {"blocked": False}
+
+        def trace(sql):
+            if not state["blocked"] and sql == "BEGIN IMMEDIATE":
+                state["blocked"] = True
+                transaction_barrier.wait(timeout=5)
+
+        connection.set_trace_callback(trace)
+
+    synchronize_completion_transaction(repository.connection)
+    synchronize_completion_transaction(competing_repository.connection)
+
+    def finish(instance):
+        try:
+            instance.finish_captcha_task(
+                task_id, outcome="submitted", confirmation_message="Application received",
+            )
+            return "completed"
+        except ValueError:
+            return "already_completed"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(finish, (repository, competing_repository)))
+
+    assert sorted(results) == ["already_completed", "completed"]
+    assert repository.connection.execute(
+        "SELECT COUNT(*) FROM submission_evidence WHERE application_id=?", (application_id,),
+    ).fetchone()[0] == 1
+    assert repository.application(application_id)["status"] == "APPLIED_MANUAL"
+    assert repository.connection.execute(
+        "SELECT outcome FROM captcha_tasks WHERE id=?", (task_id,),
+    ).fetchone()[0] == "submitted"
+    repository.connection.close()
+    competing_repository.connection.close()
+
+
 def test_full_autopilot_requires_explicit_authorization_and_daily_limit(tmp_path):
     from fastapi.testclient import TestClient
     from sampoagent.app.main import create_app

@@ -12,31 +12,66 @@ class ApplicationMode(StrEnum):
 
 
 def classify_question(question: str) -> str:
-    lowered = question.casefold()
+    # Treat labels as phrases rather than raw substrings: ``health`` should
+    # match a disclosure question, not the ordinary job field ``healthcare``.
+    lowered = re.sub(r"[-_/]+", " ", question.casefold())
+    lowered = " ".join(lowered.split())
     high_risk_markers = (
-        "criminal", "conviction", "felony", "health", "medical", "disability", "diagnosis",
-        "health declaration", "hälsa", "hälsodeklar", "sairaus", "terveys", "terveystiedot", "vammaisuus",
-        "rikosrekisteri", "rikostausta", "brottsregister", "security clearance", "security screening",
+        "criminal", "criminal record", "criminal history", "conviction*", "convicted", "felony",
+        "arrest", "arrested", "charged with", "offence", "offense", "disease*", "illness*",
+        "diagnosis", "disability", "disabilities", "reasonable accommodation", "medical history",
+        "medical record", "medical information", "medical condition*", "medical screening",
+        "medical examination", "medical test", "medical restriction", "medication",
+        "health declaration", "health status", "health condition", "health history",
+        "health information", "health issue*", "health problem*", "health restriction",
+        "health limitation", "health questionnaire",
+        "hälsa", "hälsodeklar*", "sairaus", "sairauks*", "terveys", "terveydentila", "terveystiedot",
+        "vammaisuus", "vamma*", "rikostuomio*", "rikosrekisteri", "rikostausta", "pidätetty",
+        "syytetty", "tuomittu", "brottsregister", "brott", "döm*", "åtalad", "arresterad",
+        "sickness", "sjukdom*", "funktionsnedsättning", "hälsotillstånd",
+        "security clearance", "security screening",
         "clearance", "säkerhetsprövning", "turvallisuusselvitys", "background check", "taustaselvitys",
-        "immigration", "visa sponsorship", "sponsorship",
-        "work authorization", "authorized to work", "right to work", "eligible to work",
+        "background screening", "background checking", "immigration", "visa", "sponsorship",
+        "work authorization", "authorized to work", "authorised to work", "right to work",
+        "eligible to work", "legally work", "legally permitted to work", "legally allowed to work", "permission to work",
         "work permit", "work eligibility", "työlupa", "työskentelyoikeus", "oikeus työskennellä",
-        "rätt att arbeta", "arbetstillstånd", "passport", "nationality",
-        "citizenship", "medborgarskap", "national identity", "identity number", "social security",
-        "personal identity code", "henkilötunnus", "bank account", "bank details", "pankkitili", "tilinumero",
-        "equal opportunity", "demographic", "gender", "race", "ethnicity",
-        "sexual orientation", "religion", "political affiliation", "union membership",
-        "assessment", "soveltuvuusarviointi", "lämplighetstest", "bedömning",
-        "adjustment to the recruitment", "reasonable adjustment", "recruitment process adjustment",
-        "mukautus", "rekrytointiprosessi", "anpassning av rekryteringsprocessen",
-        "sukupuoli", "kön", "etninen alkuperä", "etnicitet", "jämlikhet",
+        "työviisumi", "työskentelylupa", "oleskelulupa", "rätt att arbeta", "arbetstillstånd",
+        "arbeta lagligt", "passport", "nationality", "citizenship", "medborgarskap",
+        "national identity", "identity number", "social security", "social security number", "ssn",
+        "personal identity code", "date of birth", "birth date", "birthplace", "place of birth",
+        "age", "how old are you", "your age", "födelsedatum", "födelseort", "ålder",
+        "hur gammal är du", "kuinka vanha olet", "syntymäaika", "syntymävuosi", "syntymäpaikka",
+        "henkilötunnus", "bank account", "bank details", "pankkitili", "tilinumero",
+        "equal opportunity", "demographic", "gender", "sex", "gender identity", "race", "ethnicity",
+        "ethnic origin", "marital status", "civil status", "pregnant", "pregnancy", "family status",
+        "veteran status", "sexual orientation", "religion", "political affiliation", "union membership",
+        "sukupuoli", "ikä", "siviilisääty", "perhesuhde", "raskaana", "etninen alkuperä",
+        "uskonto", "poliittinen kanta", "ammattiyhdistys", "kön", "könsidentitet", "civilstånd",
+        "familjesituation", "gravid", "etnicitet", "religion", "politisk tillhörighet", "fackförening",
+        "assessment", "soveltuvuusarviointi*", "lämplighetstest*", "bedömning*",
+        "adjustment to the recruitment", "reasonable adjustment", "reasonable accommodations",
+        "recruitment process adjustment", "accommodations during", "interview accommodation",
+        "mukautus*", "rekrytointiprosessi*", "anpassning*",
+        "jämlikhet",
         "privacy notice", "privacy policy", "privacy terms", "data processing", "consent to process",
-        "data retention", "data storage", "tietosuojaseloste", "tietojen säilytys",
-        "henkilötietojen käsittely", "integritetspolicy", "dataskydd", "datalagring",
+        "data retention", "data storage", "tietosuojaseloste*", "tietojen säilytys*",
+        "henkilötietojen käsittely*", "integritetspolicy*", "dataskydd*", "datalagring*",
         "terms and conditions", "accept the terms", "agree to our terms", "julkinen asiakirja",
-        "julkisuuslaki", "i certify", "i declare", "truthful", "accuracy declaration", "legally binding",
+        "julkisuuslaki", "i certify", "i declare", "declare that", "attest that", "truthful",
+        "true and complete", "true and correct", "accurate and complete", "correct and complete",
+        "information provided is", "i confirm that the information", "accuracy declaration", "legally binding",
+        "vahvistan antamani tiedot", "oikeiksi ja täydellisiksi", "tiedot ovat oikeita",
+        "intygar", "uppgifterna är fullständiga och korrekta",
     )
-    if any(term in lowered for term in high_risk_markers):
+
+    def has_marker(marker: str) -> bool:
+        prefix = marker.endswith("*")
+        phrase = marker[:-1] if prefix else marker
+        parts = r"\s+".join(re.escape(part) for part in phrase.split())
+        suffix = r"\w*" if prefix else r"(?!\w)"
+        return re.search(rf"(?<!\w){parts}{suffix}", lowered) is not None
+
+    if any(has_marker(term) for term in high_risk_markers):
         return "HIGH"
     if any(term in lowered for term in ("salary", "motivation", "start date", "experience", "notice period", "pay expectation", "hourly pay", "expected pay", "wage expectation")):
         return "MEDIUM"

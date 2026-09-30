@@ -17,6 +17,19 @@ SampoAgent does not bypass access controls, and an uncertain post-submit result
 is never retried automatically. Codex-assisted final submission follows its
 separate job-specific confirmation rule.
 
+Application-question risk detection is deterministic phrase matching with
+English, Finnish and Swedish variants; it is not an AI decision or an exhaustive
+legal/medical classifier. Currently recognized phrases include tested examples
+from illness, criminal-history, work-authorization, identity, demographic,
+privacy, assessment, accommodation and truth-declaration prompts. Only a matched
+phrase is classified as high risk; this does not mean every prompt in those
+categories is recognized. Phrase boundaries avoid treating role terms such as
+“healthcare” or “medical assistant” as personal-health disclosures. An
+unrecognized required answer independently remains unresolved and blocks form
+entry/submission. Broader ATS wording and country-specific variants still
+require staging coverage; do not treat this phrase set as universal Autopilot
+certification.
+
 ## Credentials and logs
 
 Provider API keys are configured outside SQLite. Gmail/Outlook inbox-read and

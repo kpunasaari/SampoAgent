@@ -76,7 +76,21 @@ def test_finnish_and_swedish_work_permission_prompts_are_high_risk():
         'Onko sinulla oikeus työskennellä Suomessa?',
         'Har du rätt att arbeta i Finland?',
     ):
-        assert classify_question(label) == 'HIGH'
+        risk = classify_question(label)
+        assert risk == 'HIGH', label
+        assert not can_submit(
+            ApplicationMode.AUTOPILOT,
+            dry_run=False,
+            risk=risk,
+            applied_today=0,
+            daily_limit=5,
+            autopilot_authorized=True,
+            within_scope=True,
+            required_answers_resolved=True,
+            job_active=True,
+            duplicate=False,
+            paused=False,
+        ), label
 
 
 def test_assessment_adjustment_demographic_and_privacy_prompts_are_high_risk_in_all_ui_languages():
@@ -94,7 +108,56 @@ def test_assessment_adjustment_demographic_and_privacy_prompts_are_high_risk_in_
         'Hyväksytkö tietosuojaselosteen ja tietojen säilytyksen?',
         'Godkänner du integritetspolicyn och datalagringen?',
     ):
-        assert classify_question(label) == 'HIGH'
+        assert classify_question(label) == 'HIGH', label
+
+
+def test_high_risk_paraphrases_are_detected_across_english_finnish_and_swedish():
+    for label in (
+        'Have you ever been arrested or charged with an offence?',
+        'Do you require visa support to take this role?',
+        'Which countries are you legally permitted to work in?',
+        'Do you have any illnesses that could affect your work?',
+        'Do you have any medical conditions?',
+        'Have you ever had any convictions?',
+        'Have you received treatment for any health issues?',
+        'Can you legally work in Finland?',
+        'Do you need reasonable accommodations during an interview?',
+        'Sex assigned at birth',
+        'What is your date of birth?',
+        'Kuinka vanha olet?',
+        'Hur gammal är du?',
+        'Are you currently pregnant?',
+        'I confirm that the information provided is true and complete.',
+        'Oletko saanut rikostuomion?',
+        'Onko sinulla sairauksia, jotka voivat vaikuttaa työhön?',
+        'Vahvistan antamani tiedot oikeiksi ja täydellisiksi.',
+        'Har du tidigare dömts för brott?',
+        'Har du tidigare dömts?',
+        'Har du någon sjukdom?',
+        'Skulle du behöva anpassningar inför en anställningsintervju?',
+        'Är du gravid?',
+        'Jag intygar att uppgifterna är fullständiga och korrekta.',
+    ):
+        risk = classify_question(label)
+        assert risk == 'HIGH', label
+        assert not can_submit(
+            ApplicationMode.AUTOPILOT,
+            dry_run=False,
+            risk=risk,
+            applied_today=0,
+            daily_limit=5,
+            autopilot_authorized=True,
+            within_scope=True,
+            required_answers_resolved=True,
+            job_active=True,
+            duplicate=False,
+            paused=False,
+        ), label
+
+
+def test_classifier_does_not_treat_healthcare_as_a_health_declaration():
+    assert classify_question('What experience do you have in healthcare?') == 'MEDIUM'
+    assert classify_question('What experience do you have as a medical assistant?') == 'MEDIUM'
 
 
 def test_autopilot_pauses_for_captcha_missing_answers_scope_and_limit():

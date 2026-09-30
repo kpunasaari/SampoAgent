@@ -1,6 +1,8 @@
 from pathlib import Path
 from hashlib import sha256
 
+import pytest
+
 from sampoagent.cv.archive import choose_application_cv
 
 
@@ -213,6 +215,101 @@ def test_user_selected_archived_cv_also_requires_its_original_checksum(tmp_path:
         assert "checksum" in str(error).casefold()
     else:
         raise AssertionError("A changed archived CV must not be prepared for an application")
+
+
+def test_job_specific_cv_includes_only_a_confirmed_phone_answer(tmp_path: Path):
+    from pypdf import PdfReader
+    from sampoagent.applications.packages import prepare_job_cv
+    from sampoagent.db.repository import Repository
+
+    repository = Repository(":memory:")
+    repository.initialize()
+    repository.load_demo()
+    repository.add_answer(
+        "FACT", "Phone number (include country only if needed)", "+358 40 000 0000", "USER_CONFIRMED",
+    )
+
+    prepared = prepare_job_cv(
+        repository,
+        {"id": 52, "title": "Warehouse Worker", "description": "Forklift operation preferred.", "language": "en"},
+        tmp_path / "generated",
+    )
+
+    text = "\n".join(page.extract_text() or "" for page in PdfReader(str(prepared.choice.path)).pages)
+    assert "+358 40 000 0000" in text
+    repository.connection.close()
+
+
+def test_confirmed_phone_prevents_reusing_an_archive_that_omits_it(tmp_path: Path):
+    from pypdf import PdfReader
+    from reportlab.pdfgen.canvas import Canvas
+    from sampoagent.applications.packages import prepare_job_cv
+    from sampoagent.db.repository import Repository
+
+    repository = Repository(":memory:")
+    repository.initialize()
+    repository.load_demo()
+    repository.add_answer(
+        "FACT", "Phone number (include country only if needed)", "+358 40 000 0000", "USER_CONFIRMED",
+    )
+    archived = tmp_path / "old-without-phone.pdf"
+    canvas = Canvas(str(archived))
+    canvas.drawString(50, 780, "Aino Example")
+    canvas.drawString(50, 750, "aino@example.test")
+    canvas.drawString(50, 720, "Warehouse Worker")
+    canvas.drawString(50, 690, "Forklift operation")
+    canvas.save()
+    repository.archive_cv(
+        path=str(archived), checksum=sha256(archived.read_bytes()).hexdigest(),
+        language="en", role_family="warehouse_logistics", source_job_id=None,
+        fit_score=100, text_check_score=100, strategy="uploaded",
+    )
+
+    prepared = prepare_job_cv(
+        repository,
+        {"id": 54, "title": "Warehouse Worker", "description": "Forklift operation preferred.", "language": "en"},
+        tmp_path / "generated",
+    )
+
+    text = "\n".join(page.extract_text() or "" for page in PdfReader(str(prepared.choice.path)).pages)
+    assert prepared.choice.strategy == "generated"
+    assert prepared.choice.path != archived
+    assert "+358 40 000 0000" in text
+    repository.connection.close()
+
+
+@pytest.mark.parametrize("answer_state", ["draft", "declined", "conflict", "expired"])
+def test_job_specific_cv_excludes_unconfirmed_phone_answers(tmp_path: Path, answer_state: str):
+    from pypdf import PdfReader
+    from sampoagent.applications.packages import prepare_job_cv
+    from sampoagent.db.repository import Repository
+
+    repository = Repository(":memory:")
+    repository.initialize()
+    repository.load_demo()
+    phone_question = "Phone number (include country only if needed)"
+    if answer_state == "draft":
+        answer_id = repository.add_answer("FACT", phone_question, "+358 40 000 0000", "AI_GENERATED")
+    elif answer_state == "declined":
+        answer_id = repository.add_answer("FACT", phone_question, "Prefer not to answer", "USER_CONFIRMED")
+    elif answer_state == "conflict":
+        repository.add_answer("FACT", phone_question, "+358 40 000 0000", "USER_CONFIRMED")
+        answer_id = repository.add_answer("FACT", phone_question, "+358 50 000 0000", "USER_CONFIRMED")
+    else:
+        answer_id = repository.add_answer("FACT", phone_question, "+358 40 000 0000", "USER_CONFIRMED")
+        repository.connection.execute("UPDATE answer_bank SET valid_until='2000-01-01' WHERE id=?", (answer_id,))
+        repository.connection.commit()
+
+    prepared = prepare_job_cv(
+        repository,
+        {"id": 53, "title": "Warehouse Worker", "description": "Forklift operation preferred.", "language": "en"},
+        tmp_path / "generated",
+    )
+
+    text = "\n".join(page.extract_text() or "" for page in PdfReader(str(prepared.choice.path)).pages)
+    assert "+358 40 000 0000" not in text
+    assert "+358 50 000 0000" not in text
+    repository.connection.close()
 
 
 def test_user_selected_cv_with_stale_identity_falls_back_to_current_profile_cv(tmp_path):

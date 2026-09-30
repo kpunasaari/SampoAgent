@@ -41,6 +41,22 @@ def test_pdf_text_check_api_describes_only_parsed_pdf_text_presence(tmp_path: Pa
     assert isinstance(validate_ats_pdf(path, required=["Aino Example"]), PDFTextCheck)
 
 
+def test_generated_cv_includes_optional_candidate_phone_when_provided(tmp_path: Path) -> None:
+    from pypdf import PdfReader
+    from sampoagent.cv.service import generate_cv_pdf
+
+    path = generate_cv_pdf(
+        output_dir=tmp_path,
+        language="en",
+        role_family="cleaning_facilities",
+        candidate={"name": "Aino Example", "email": "aino@example.test", "phone": "+358 40 000 0000"},
+        facts=[],
+    )
+
+    text = "\n".join(page.extract_text() or "" for page in PdfReader(str(path)).pages)
+    assert "+358 40 000 0000" in text
+
+
 def test_cv_filename_pattern_uses_safe_placeholders(tmp_path: Path) -> None:
     from sampoagent.cv.service import render_filename
 

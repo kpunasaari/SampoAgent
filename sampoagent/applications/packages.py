@@ -1,11 +1,11 @@
 """Verified, job-specific CV packages for queued applications."""
 
 from dataclasses import dataclass
-from datetime import date
 from hashlib import sha256
 from pathlib import Path
 import shutil
 
+from sampoagent.applications.field_resolver import FormField, resolve_application_fields
 from sampoagent.applications.urls import is_safe_public_https_url
 from sampoagent.cv.archive import CVChoice, choose_application_cv
 
@@ -14,6 +14,29 @@ from sampoagent.cv.archive import CVChoice, choose_application_cv
 class PreparedCV:
     choice: CVChoice
     note: str
+
+
+def cv_candidate_profile(repository: object, profile: dict[str, str]) -> dict[str, str]:
+    """Add a phone number only when its current candidate answer resolves safely."""
+    phone_field = FormField(
+        field_id="cv_phone",
+        label="Phone number (include country only if needed)",
+        required=False,
+        kind="tel",
+    )
+    resolution = resolve_application_fields(
+        [phone_field],
+        profile=profile,
+        facts=repository.rows("facts"),
+        answers=repository.answers(),
+    )
+    candidate = dict(profile)
+    phone = resolution.values.get(phone_field.field_id, "")
+    if phone:
+        candidate["phone"] = phone
+    else:
+        candidate.pop("phone", None)
+    return candidate
 
 
 def prepare_job_cv(repository: object, job: dict[str, object], storage_dir: Path, *, requested_path: str = "") -> PreparedCV:
@@ -33,8 +56,9 @@ def prepare_job_cv(repository: object, job: dict[str, object], storage_dir: Path
         preferred_path = path
     record_types = ("experience", "education", "certificate", "licence")
     records = {kind: repository.candidate_records(kind) for kind in record_types}
+    cv_profile = cv_candidate_profile(repository, profile)
     choice = choose_application_cv(
-        output_dir=storage_dir / "archive", archived=archived, job=job, candidate=profile,
+        output_dir=storage_dir / "archive", archived=archived, job=job, candidate=cv_profile,
         facts=repository.rows("facts"), records=records,
         learning_adjustments=repository.cv_learning_adjustments(),
         preferred_path=preferred_path,

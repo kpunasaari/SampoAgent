@@ -80,6 +80,9 @@ def _contains_current_candidate_identity(text: str, candidate: dict[str, str]) -
         return False
     if email and _normalized_text(email) not in normalized:
         return False
+    phone = str(candidate.get("phone", "")).strip()
+    if phone and _normalized_text(phone) not in normalized:
+        return False
     embedded_emails = re.findall(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", text)
     if embedded_emails and (not email or any(_normalized_text(item) != _normalized_text(email) for item in embedded_emails)):
         return False
@@ -191,7 +194,7 @@ def choose_application_cv(*, output_dir: Path, archived: list[dict[str, object]]
         if not _contains_current_candidate_identity(text, candidate):
             identity_mismatch_found = True
             if selected:
-                preferred_rejection_reason = "Candidate-selected archived CV did not match the current candidate name or email"
+                preferred_rejection_reason = "Candidate-selected archived CV did not match the current candidate name, email or confirmed phone"
             continue
         score, reasons = assess_cv_fit(
             text, job=job, facts=usable_facts, records=usable_records, role_family=family,
@@ -255,6 +258,8 @@ def choose_application_cv(*, output_dir: Path, archived: list[dict[str, object]]
     required = [candidate["name"]]
     if candidate.get("email"):
         required.append(candidate["email"])
+    if candidate.get("phone"):
+        required.append(candidate["phone"])
     required.extend(str(fact["value"]) for fact in usable_facts if fact.get("type") in {"skill", "language", "certificate", "licence"})
     required.extend(str(record.get("title") or record.get("name") or "") for group in usable_records.values() for record in group if record.get("title") or record.get("name"))
     report = check_pdf_text(path, required=required)

@@ -37,6 +37,30 @@ def test_cv_page_uses_safe_filename_pattern_and_exposes_download() -> None:
     assert download.headers["content-type"].startswith("application/pdf")
 
 
+def test_manual_cv_generation_includes_confirmed_phone_answer(tmp_path) -> None:
+    import re
+    from pypdf import PdfReader
+    from fastapi.testclient import TestClient
+    from sampoagent.app.main import create_app
+
+    app = create_app(database_path=":memory:", demo_data=True, storage_dir=tmp_path)
+    repository = app.state.repository
+    repository.add_answer(
+        "FACT", "Phone number (include country only if needed)", "+358 40 000 0000", "USER_CONFIRMED",
+    )
+    client = TestClient(app)
+
+    response = client.post("/cvs/generate", data={"language": "en", "role_family": "warehouse_logistics"}, follow_redirects=True)
+
+    generated = re.search(r"Aino_Example_warehouse_logistics_en_[a-f0-9]{8}\.pdf", response.text)
+    assert generated
+    download = client.get(f"/cvs/generated/{generated.group(0)}")
+    assert download.status_code == 200
+    path = tmp_path / "generated" / generated.group(0)
+    text = "\n".join(page.extract_text() or "" for page in PdfReader(str(path)).pages)
+    assert "+358 40 000 0000" in text
+
+
 def test_cv_archive_explains_text_check_without_claiming_ats_or_hiring_success(tmp_path) -> None:
     from hashlib import sha256
     from fastapi.testclient import TestClient

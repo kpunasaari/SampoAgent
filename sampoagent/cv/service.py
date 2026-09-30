@@ -174,8 +174,9 @@ def generate_cv_pdf(
         Paragraph(escape(copy["heading"]), title_style),
         Paragraph(escape(candidate["name"]), name_style),
     ]
-    contacts = [candidate.get("email", "").strip()]
-    if contacts[0]:
+    contacts = [candidate.get(key, "").strip() for key in ("email", "phone")]
+    contacts = [value for value in contacts if value]
+    if contacts:
         story.append(Paragraph(escape(" | ".join(contacts)), meta_style))
     if target_title:
         story.append(Spacer(1, 7))

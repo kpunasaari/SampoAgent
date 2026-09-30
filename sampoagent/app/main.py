@@ -2030,10 +2030,15 @@ def create_app(
         pattern = filename_pattern or "{first}_{last}_{role}_{language}_{version}.pdf"
         if "{version}" not in pattern:
             pattern = pattern.removesuffix(".pdf") + "_{version}.pdf"
-        path = generate_cv_pdf(output_dir=app.state.storage_dir / "generated", language=language, role_family=role_family, candidate=profile, facts=facts, filename_pattern=pattern, company=company, records=records, target_title=str(job["title"]) if job else "", version=version)
+        from sampoagent.applications.packages import cv_candidate_profile
+
+        cv_profile = cv_candidate_profile(repository, profile)
+        path = generate_cv_pdf(output_dir=app.state.storage_dir / "generated", language=language, role_family=role_family, candidate=cv_profile, facts=facts, filename_pattern=pattern, company=company, records=records, target_title=str(job["title"]) if job else "", version=version)
         required = [profile["name"]]
         if profile.get("email"):
             required.append(profile["email"])
+        if cv_profile.get("phone"):
+            required.append(cv_profile["phone"])
         required.extend(str(fact["value"]) for fact in facts if fact.get("confirmed") and fact.get("type") in {"skill", "language"})
         required.extend(str(record.get("title") or record.get("name") or "") for group in records.values() for record in group if record.get("title") or record.get("name"))
         report = check_pdf_text(path, required=required)

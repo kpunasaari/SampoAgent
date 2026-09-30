@@ -2,6 +2,8 @@ from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 
+import pytest
+
 from sampoagent.agents.browser import FormInspection, SubmissionResult
 from sampoagent.agents.forms import FormSchema
 from sampoagent.applications.field_resolver import FormField
@@ -830,6 +832,37 @@ def test_cross_origin_submission_redirect_is_not_recorded_as_confirmation(tmp_pa
     assert browser.submitted == 1
     assert repository.submission_evidence_for_application(application_id) == []
     assert repository.application(application_id)["queue_state"] == "DO_NOT_RETRY"
+    repository.connection.close()
+
+
+@pytest.mark.parametrize("multistep", [False, True])
+def test_captcha_redirect_with_session_url_is_queued_from_reviewed_job(multistep, tmp_path):
+    repository, application_id = _authorized_repository(tmp_path)
+    challenge_url = "https://careers.northstar-logistics.fi/apply/warehouse?session=private-session"
+    result = SubmissionResult(
+        submitted=False,
+        outcome_unknown=True,
+        manual_action_required=False,
+        message="Access challenge detected",
+        final_url=challenge_url,
+        captcha_detected=True,
+    )
+    if multistep:
+        browser = MultiStepFakeBrowser((
+            _step_inspection([FormField("name", "Full name", True)], 1, has_next=True),
+            _step_inspection(_basic_fields(), 2, has_next=False),
+        ), result=result)
+    else:
+        browser = FakeBrowser(_basic_fields(), result=result)
+
+    status = process_application(repository, application_id, browser)
+
+    assert status == "CAPTCHA_HOLD"
+    assert repository.application(application_id)["status"] == "CAPTCHA_HOLD"
+    assert repository.submission_evidence_for_application(application_id) == []
+    task = repository.captcha_tasks()[0]
+    assert task["official_url"] == "https://careers.northstar-logistics.fi/apply/warehouse"
+    assert task["official_url"] != challenge_url
     repository.connection.close()
 
 

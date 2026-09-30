@@ -1524,20 +1524,21 @@ class Repository:
             self.connection.rollback()
             raise
 
-    def hold_for_captcha(self, application_id: int, *, detected_url: str, note: str = "") -> int:
-        """Stop an application at an access challenge and create a user task."""
-        from urllib.parse import urlsplit
+    def hold_for_captcha(self, application_id: int, *, note: str = "") -> int:
+        """Stop at an access challenge; store a handoff URL only when it is safe."""
+        from sampoagent.applications.urls import is_safe_public_https_url
 
-        parsed = urlsplit(detected_url)
-        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
-            raise ValueError("CAPTCHA task requires a credential-free HTTPS application URL")
-        if not self.application(application_id):
+        application = self.application(application_id)
+        if not application:
             raise ValueError("Application does not exist")
+        job = self.job(int(application["job_id"]))
+        official_url = str((job or {}).get("application_url", ""))
+        handoff_url = official_url if is_safe_public_https_url(official_url) else ""
         now = datetime.now(timezone.utc).isoformat()
         with self.connection:
             self.connection.execute(
                 "INSERT INTO captcha_tasks(application_id, detected_url, state, note, created_at) VALUES (?, ?, 'WAITING_USER', ?, ?) ON CONFLICT(application_id) DO UPDATE SET detected_url=excluded.detected_url, state=CASE WHEN captcha_tasks.state='IN_PROGRESS' THEN 'IN_PROGRESS' ELSE 'WAITING_USER' END, note=excluded.note, finished_at=NULL",
-                (application_id, detected_url, note[:500], now),
+                (application_id, handoff_url, note[:500], now),
             )
             task_id = int(self.connection.execute("SELECT id FROM captcha_tasks WHERE application_id=?", (application_id,)).fetchone()[0])
             self.connection.execute("UPDATE applications SET status='CAPTCHA_HOLD', queue_state='WAITING_USER', updated_at=? WHERE id=?", (now, application_id))
@@ -1546,7 +1547,23 @@ class Repository:
         return task_id
 
     def captcha_tasks(self) -> list[dict[str, object]]:
-        return [dict(row) for row in self.connection.execute("SELECT t.*, a.job_id, j.title, j.company FROM captcha_tasks t JOIN applications a ON a.id=t.application_id JOIN jobs j ON j.id=a.job_id WHERE t.state IN ('WAITING_USER','IN_PROGRESS') ORDER BY CASE t.state WHEN 'IN_PROGRESS' THEN 0 ELSE 1 END, t.created_at, t.id")]
+        from sampoagent.applications.urls import is_safe_public_https_url
+
+        rows = self.connection.execute(
+            "SELECT t.id, t.application_id, t.state, t.note, t.outcome, t.created_at, t.started_at, t.finished_at, "
+            "a.job_id, j.title, j.company, j.application_url AS verified_application_url "
+            "FROM captcha_tasks t JOIN applications a ON a.id=t.application_id "
+            "JOIN jobs j ON j.id=a.job_id WHERE t.state IN ('WAITING_USER','IN_PROGRESS') "
+            "ORDER BY CASE t.state WHEN 'IN_PROGRESS' THEN 0 ELSE 1 END, t.created_at, t.id"
+        )
+        tasks = []
+        for row in rows:
+            task = dict(row)
+            official_url = str(task.pop("verified_application_url", "") or "")
+            # Also protect tasks created by older releases that persisted redirects.
+            task["official_url"] = official_url if is_safe_public_https_url(official_url) else ""
+            tasks.append(task)
+        return tasks
 
     def begin_captcha_task(self, task_id: int) -> None:
         now = datetime.now(timezone.utc).isoformat()
@@ -1578,7 +1595,7 @@ class Repository:
         self.connection.execute("BEGIN IMMEDIATE")
         try:
             task = self.connection.execute(
-                "SELECT application_id, detected_url, state FROM captcha_tasks WHERE id=?",
+                "SELECT application_id, state FROM captcha_tasks WHERE id=?",
                 (task_id,),
             ).fetchone()
             if not task or task["state"] != "IN_PROGRESS":
@@ -1587,7 +1604,7 @@ class Repository:
             self.connection.execute("UPDATE applications SET status=?, queue_state='COMPLETED', updated_at=? WHERE id=?", (final_status, now, int(task["application_id"])))
             self.connection.execute("INSERT INTO application_timeline(application_id, status, note, created_at) VALUES (?, ?, ?, ?)", (int(task["application_id"]), final_status, "Candidate completed the CAPTCHA step manually" + (": " + confirmation_message.strip()[:300] if outcome == "submitted" else ""), now))
             if outcome == "submitted":
-                self.connection.execute("INSERT INTO submission_evidence(application_id, final_url, confirmation_message, confirmation_id, agent_provider, created_at) VALUES (?, ?, ?, NULL, 'manual_captcha', ?)", (int(task["application_id"]), str(task["detected_url"]), confirmation_message.strip()[:300], now))
+                self.connection.execute("INSERT INTO submission_evidence(application_id, final_url, confirmation_message, confirmation_id, agent_provider, created_at) VALUES (?, '', ?, NULL, 'manual_captcha', ?)", (int(task["application_id"]), confirmation_message.strip()[:300], now))
             self.log("captcha_task_completed", f"{int(task['application_id'])}: {outcome}")
             self.connection.commit()
         except Exception:

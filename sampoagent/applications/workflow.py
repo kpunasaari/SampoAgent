@@ -85,7 +85,7 @@ def record_submission_result(repository: Any, application_id: int, result: Any) 
     if not application:
         raise ValueError("Application does not exist")
     if result.captcha_detected:
-        repository.hold_for_captcha(application_id, detected_url=result.final_url or "")
+        repository.hold_for_captcha(application_id)
         repository.finish_submission_attempt(application_id, state="CAPTCHA_HOLD", message="CAPTCHA detected; no automatic solving or retry")
         return "CAPTCHA_HOLD"
     if result.outcome_unknown:

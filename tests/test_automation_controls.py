@@ -1,5 +1,19 @@
+import pytest
+
 from sampoagent.applications.workflow import ApplicationMode, can_submit, classify_question
 from sampoagent.db.repository import Repository
+
+
+def _set_public_captcha_test_urls(repository: Repository) -> None:
+    repository.connection.execute(
+        "UPDATE jobs SET application_url=? WHERE id=1",
+        ("https://careers.northstar-logistics.fi/apply/warehouse",),
+    )
+    repository.connection.execute(
+        "UPDATE jobs SET application_url=? WHERE id=2",
+        ("https://careers.northstar-services.fi/apply/service",),
+    )
+    repository.connection.commit()
 
 
 def test_autopilot_sends_without_per_job_prompt_only_inside_grant_scope():
@@ -110,10 +124,11 @@ def test_captcha_tasks_accumulate_and_are_handled_one_at_a_time():
     repository = Repository(":memory:")
     repository.initialize()
     repository.load_demo()
+    _set_public_captcha_test_urls(repository)
     first = repository.queue_application(1, language="en", cv_path=None)
     second = repository.queue_application(2, language="fi", cv_path=None)
-    repository.hold_for_captcha(first, detected_url="https://example.test/apply/1")
-    repository.hold_for_captcha(second, detected_url="https://example.test/apply/2")
+    repository.hold_for_captcha(first)
+    repository.hold_for_captcha(second)
     assert [task["application_id"] for task in repository.captcha_tasks()] == [first, second]
     repository.begin_captcha_task(first)
     try:
@@ -136,10 +151,9 @@ def test_concurrent_captcha_completion_records_one_terminal_outcome_and_one_rece
     repository = Repository(database_path)
     repository.initialize()
     repository.load_demo()
+    _set_public_captcha_test_urls(repository)
     application_id = repository.queue_application(1, language="en", cv_path=None)
-    task_id = repository.hold_for_captcha(
-        application_id, detected_url="https://careers.example.fi/apply/1",
-    )
+    task_id = repository.hold_for_captcha(application_id)
     repository.begin_captcha_task(task_id)
     competing_repository = Repository(database_path)
     transaction_barrier = Barrier(2)
@@ -259,7 +273,9 @@ def test_captcha_ui_requires_manual_single_item_completion():
     from fastapi.testclient import TestClient
     from sampoagent.app.main import create_app
 
-    client = TestClient(create_app(database_path=":memory:", demo_data=True))
+    app = create_app(database_path=":memory:", demo_data=True)
+    _set_public_captcha_test_urls(app.state.repository)
+    client = TestClient(app)
     client.post("/queue/prepare/1")
     client.post("/queue/1/captcha")
     client.post("/captcha/1/start")
@@ -275,29 +291,26 @@ def test_captcha_queue_offers_only_one_waiting_task_until_it_is_finished():
 
     app = create_app(database_path=":memory:", demo_data=True)
     repository = app.state.repository
+    _set_public_captcha_test_urls(repository)
     first_application = repository.queue_application(1, language="en", cv_path=None)
     second_application = repository.queue_application(2, language="fi", cv_path=None)
-    first_task = repository.hold_for_captcha(
-        first_application, detected_url="https://example.test/apply/1",
-    )
-    second_task = repository.hold_for_captcha(
-        second_application, detected_url="https://example.test/apply/2",
-    )
+    first_task = repository.hold_for_captcha(first_application)
+    second_task = repository.hold_for_captcha(second_application)
     client = TestClient(app, follow_redirects=False)
 
     waiting_page = client.get("/captcha").text
     assert f"action='/captcha/{first_task}/start'" in waiting_page
     assert f"action='/captcha/{second_task}/start'" not in waiting_page
-    assert "href='https://example.test/apply/1'" not in waiting_page
-    assert "href='https://example.test/apply/2'" not in waiting_page
+    assert "href='https://careers.northstar-logistics.fi/apply/warehouse'" not in waiting_page
+    assert "href='https://careers.northstar-services.fi/apply/service'" not in waiting_page
     assert "Waiting for the current CAPTCHA task to finish" in waiting_page
 
     assert client.post(f"/captcha/{first_task}/start").status_code == 303
     active_page = client.get("/captcha").text
     assert f"action='/captcha/{first_task}/finish'" in active_page
     assert f"action='/captcha/{second_task}/start'" not in active_page
-    assert "href='https://example.test/apply/1'" in active_page
-    assert "href='https://example.test/apply/2'" not in active_page
+    assert "href='https://careers.northstar-logistics.fi/apply/warehouse'" in active_page
+    assert "href='https://careers.northstar-services.fi/apply/service'" not in active_page
 
     assert client.post(
         f"/captcha/{first_task}/finish",
@@ -305,12 +318,12 @@ def test_captcha_queue_offers_only_one_waiting_task_until_it_is_finished():
     ).status_code == 303
     next_page = client.get("/captcha").text
     assert f"action='/captcha/{second_task}/start'" in next_page
-    assert "href='https://example.test/apply/2'" not in next_page
+    assert "href='https://careers.northstar-services.fi/apply/service'" not in next_page
 
     assert client.post(f"/captcha/{second_task}/start").status_code == 303
     next_active_page = client.get("/captcha").text
     assert f"action='/captcha/{second_task}/finish'" in next_active_page
-    assert "href='https://example.test/apply/2'" in next_active_page
+    assert "href='https://careers.northstar-services.fi/apply/service'" in next_active_page
 
 
 def test_dashboard_calls_for_user_help_when_captcha_tasks_are_waiting():
@@ -319,8 +332,9 @@ def test_dashboard_calls_for_user_help_when_captcha_tasks_are_waiting():
 
     app = create_app(database_path=":memory:", demo_data=True)
     repository = app.state.repository
+    _set_public_captcha_test_urls(repository)
     application_id = repository.queue_application(1, language="en", cv_path=None)
-    repository.hold_for_captcha(application_id, detected_url="https://example.test/apply/1")
+    repository.hold_for_captcha(application_id)
 
     page = TestClient(app).get("/")
 
@@ -335,8 +349,9 @@ def test_submission_result_pauses_for_captcha_and_never_retries_unknown_outcome(
     repository = Repository(":memory:")
     repository.initialize()
     repository.load_demo()
+    _set_public_captcha_test_urls(repository)
     application_id = repository.queue_application(1, language="en", cv_path=None)
-    captcha = SubmissionResult(False, True, "Challenge detected", "https://example.test/apply/1", captcha_detected=True)
+    captcha = SubmissionResult(False, True, "Challenge detected", "https://careers.northstar-logistics.fi/apply/warehouse", captcha_detected=True)
     assert record_submission_result(repository, application_id, captcha) == "CAPTCHA_HOLD"
     task = repository.captcha_tasks()[0]
     assert task["state"] == "WAITING_USER"
@@ -345,6 +360,142 @@ def test_submission_result_pauses_for_captcha_and_never_retries_unknown_outcome(
     uncertain = SubmissionResult(False, True, "Connection dropped", "https://example.test/apply/2", outcome_unknown=True)
     assert record_submission_result(repository, other, uncertain) == "SUBMITTED_UNVERIFIED"
     assert repository.application(other)["queue_state"] == "DO_NOT_RETRY"
+
+
+@pytest.mark.parametrize(
+    "browser_url",
+    [
+        "https://unrelated.example.net/challenge",
+        "https://127.0.0.1/admin",
+        "https://careers.northstar-logistics.fi/apply?session=private-session",
+        "https://careers.northstar-logistics.fi/redirect?continue=https://attacker.example.net",
+        "javascript:alert(1)",
+    ],
+)
+def test_captcha_handoff_uses_only_reviewed_job_url_when_browser_redirects(browser_url: str):
+    from sampoagent.agents.browser import SubmissionResult
+    from sampoagent.applications.workflow import record_submission_result
+
+    repository = Repository(":memory:")
+    repository.initialize()
+    repository.load_demo()
+    _set_public_captcha_test_urls(repository)
+    application_id = repository.queue_application(1, language="en", cv_path=None)
+    official_url = "https://careers.northstar-logistics.fi/apply/warehouse"
+    result = SubmissionResult(False, True, "Challenge detected", browser_url, captcha_detected=True)
+
+    assert record_submission_result(repository, application_id, result) == "CAPTCHA_HOLD"
+    task = repository.captcha_tasks()[0]
+    assert task["official_url"] == official_url
+    assert task["official_url"] != browser_url
+
+    repository.connection.close()
+
+
+def test_legacy_captcha_task_link_and_manual_receipt_use_reviewed_job_url():
+    repository = Repository(":memory:")
+    repository.initialize()
+    repository.load_demo()
+    _set_public_captcha_test_urls(repository)
+    application_id = repository.queue_application(1, language="en", cv_path=None)
+    official_url = "https://careers.northstar-logistics.fi/apply/warehouse"
+    now = "2026-09-30T12:00:00+00:00"
+    cursor = repository.connection.execute(
+        "INSERT INTO captcha_tasks(application_id, detected_url, state, note, created_at) VALUES (?, ?, 'WAITING_USER', '', ?)",
+        (application_id, "https://127.0.0.1/admin", now),
+    )
+    task_id = int(cursor.lastrowid)
+    repository.connection.commit()
+
+    task = next(item for item in repository.captcha_tasks() if item["id"] == task_id)
+    assert task["official_url"] == official_url
+
+    repository.begin_captcha_task(task_id)
+    repository.finish_captcha_task(
+        task_id,
+        outcome="submitted",
+        confirmation_message="Application received",
+    )
+    receipt = repository.submission_evidence_for_application(application_id)[0]
+    assert receipt["final_url"] == ""
+    assert receipt["agent_provider"] == "manual_captcha"
+    repository.connection.close()
+
+
+def test_manual_captcha_evidence_ui_does_not_label_application_url_as_confirmation_url():
+    from fastapi.testclient import TestClient
+    from sampoagent.app.main import create_app
+
+    app = create_app(database_path=":memory:", demo_data=True)
+    _set_public_captcha_test_urls(app.state.repository)
+    client = TestClient(app)
+    client.post("/queue/prepare/1")
+    client.post("/queue/1/captcha")
+    client.post("/captcha/1/start")
+    client.post(
+        "/captcha/1/finish",
+        data={"outcome": "submitted", "confirmation_message": "Application received"},
+    )
+
+    page = client.get("/applications")
+
+    assert "Manual CAPTCHA report" in page.text
+    assert "no confirmation URL was captured" in page.text
+    assert "href='https://careers.northstar-logistics.fi/apply/warehouse'>Confirmation URL</a>" not in page.text
+
+
+def test_captcha_ui_omits_link_when_legacy_jobs_no_longer_have_a_safe_public_url():
+    from fastapi.testclient import TestClient
+    from sampoagent.app.main import create_app
+
+    app = create_app(database_path=":memory:", demo_data=True)
+    repository = app.state.repository
+    application_id = repository.queue_application(1, language="en", cv_path=None)
+    repository.connection.execute(
+        "INSERT INTO captcha_tasks(application_id, detected_url, state, note, created_at) VALUES (?, ?, 'IN_PROGRESS', '', '2026-09-30T12:00:00+00:00')",
+        (application_id, "https://127.0.0.1/admin"),
+    )
+    repository.connection.commit()
+
+    client = TestClient(app)
+    page = client.get("/captcha")
+
+    assert "Open official application" not in page.text
+    assert "href=''" not in page.text
+    assert "No safe public employer application link is available" in page.text
+
+    client.post(
+        "/captcha/1/finish",
+        data={"outcome": "submitted", "confirmation_message": "Application received"},
+    )
+    assert repository.connection.execute("SELECT state FROM captcha_tasks WHERE id=1").fetchone()[0] == "COMPLETED"
+    assert repository.application(application_id)["status"] == "APPLIED_MANUAL"
+
+
+def test_captcha_hold_is_durable_when_current_reviewed_url_is_unsafe():
+    repository = Repository(":memory:")
+    repository.initialize()
+    repository.load_demo()
+    application_id = repository.queue_application(1, language="en", cv_path=None)
+
+    task_id = repository.hold_for_captcha(application_id)
+
+    task = next(item for item in repository.captcha_tasks() if item["id"] == task_id)
+    stored_url = repository.connection.execute(
+        "SELECT detected_url FROM captcha_tasks WHERE id=?", (task_id,),
+    ).fetchone()[0]
+    assert task["official_url"] == ""
+    assert stored_url == ""
+
+    repository.begin_captcha_task(task_id)
+    repository.finish_captcha_task(
+        task_id,
+        outcome="submitted",
+        confirmation_message="Application received",
+    )
+    assert repository.application(application_id)["status"] == "APPLIED_MANUAL"
+    assert repository.submission_evidence_for_application(application_id)[0]["final_url"] == ""
+    repository.connection.close()
 
 
 def test_application_claim_is_unique_even_if_reached_concurrently():

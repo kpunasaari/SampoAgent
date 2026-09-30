@@ -795,7 +795,12 @@ def create_app(
             if task["state"] == "IN_PROGRESS":
                 start = "<span class='status status-review'>In progress · finish before starting another</span>"
                 instructions = "<p>Automatic activity is paused at this challenge. Complete its CAPTCHA yourself, then record the outcome before handling the next item.</p>"
-                application_link = f"<a href='{escape(str(task['detected_url']))}' target='_blank' rel='noopener noreferrer'>Open official application</a>"
+                official_url = str(task.get("official_url", ""))
+                application_link = (
+                    f"<a href='{escape(official_url)}' target='_blank' rel='noopener noreferrer'>Open official application</a>"
+                    if official_url
+                    else "<span class='status status-review'>No safe public employer application link is available</span>"
+                )
             elif next_waiting_task is not None and task["id"] == next_waiting_task["id"]:
                 start = f"<form method='post' action='/captcha/{task['id']}/start'><button>Handle this one</button></form>"
                 instructions = "<p>This is the next waiting CAPTCHA task. Start it to open its official application page for manual handling.</p>"
@@ -818,7 +823,7 @@ def create_app(
         if not job:
             return RedirectResponse("/queue?notice=" + quote("Job was not found."), status_code=303)
         try:
-            repository.hold_for_captcha(application_id, detected_url=str(job["application_url"]))
+            repository.hold_for_captcha(application_id)
         except ValueError as error:
             return RedirectResponse("/queue?notice=" + quote("Could not move this application to manual CAPTCHA handling. Refresh the queue and try again."), status_code=303)
         return RedirectResponse("/captcha", status_code=303)
@@ -1048,7 +1053,14 @@ def create_app(
         ) or "<p>No application activity yet.</p>"
         evidence = "".join(
             f"<details><summary>Application {item['id']} submission evidence</summary>"
-            + "".join(f"<p>{escape(str(entry['confirmation_message']))} · {escape(str(entry['confirmation_id'] or 'No reference ID'))} · <a href='{escape(str(entry['final_url']))}'>Confirmation URL</a></p>" for entry in repository.submission_evidence_for_application(int(item["id"])))
+            + "".join(
+                (
+                    f"<p>Manual CAPTCHA report · {escape(str(entry['confirmation_message']))} · no confirmation URL was captured.</p>"
+                    if entry["agent_provider"] == "manual_captcha"
+                    else f"<p>{escape(str(entry['confirmation_message']))} · {escape(str(entry['confirmation_id'] or 'No reference ID'))} · <a href='{escape(str(entry['final_url']))}'>Confirmation URL</a></p>"
+                )
+                for entry in repository.submission_evidence_for_application(int(item["id"]))
+            )
             + f"<form method='post' action='/applications/{item['id']}/evidence'><label>Confirmation URL <input name='final_url' type='url' required></label> <label>Confirmation message <input name='confirmation_message' required></label> <label>Reference ID (optional) <input name='confirmation_id'></label><button>Record evidence</button></form></details>"
             for item in application_items
         ) or "<p>No submission evidence yet.</p>"

@@ -217,7 +217,6 @@ def _process_multistep_application(
         if current.captcha_detected:
             repository.hold_for_captcha(
                 application_id,
-                detected_url=current.final_url or application_url,
                 note="Browser detected an access challenge",
             )
             return "CAPTCHA_HOLD"
@@ -393,7 +392,7 @@ def _process_multistep_application(
             return _wait_for_user(repository, application_id, "NEEDS_USER", "The form changed or a field could not be safely filled.")
 
         if after_fill.captcha_detected:
-            repository.hold_for_captcha(application_id, detected_url=after_fill.final_url or application_url, note="Access challenge appeared while preparing the form")
+            repository.hold_for_captcha(application_id, note="Access challenge appeared while preparing the form")
             return "CAPTCHA_HOLD"
         if after_fill.authentication_required:
             return _wait_for_user(repository, application_id, "NEEDS_AUTH", "The employer session expired while preparing the form.")
@@ -547,7 +546,7 @@ def _process_multistep_application(
         if not result.submitted and not result.outcome_unknown and not result.captcha_detected and result.manual_action_required:
             if repository.cancel_unsubmitted_attempt(application_id, message="The browser stopped before clicking Submit; no external submission was made"):
                 return _wait_for_user(repository, application_id, "NEEDS_USER", "The browser stopped before final submission; review the form and resume when ready.")
-        if result.final_url and not is_same_public_origin(application_url, result.final_url):
+        if not result.captcha_detected and result.final_url and not is_same_public_origin(application_url, result.final_url):
             raise ValueError("Final confirmation URL changed origin")
         return record_submission_result(repository, application_id, result)
     except Exception:
@@ -611,7 +610,7 @@ def _process_claimed_application(repository: object, application_id: int, browse
     except Exception:
         return _wait_for_user(repository, application_id, "NEEDS_USER", "The application page could not be inspected safely.")
     if inspection.captcha_detected:
-        repository.hold_for_captcha(application_id, detected_url=application_url, note="Browser detected an access challenge")
+        repository.hold_for_captcha(application_id, note="Browser detected an access challenge")
         return "CAPTCHA_HOLD"
     if inspection.authentication_required:
         return _wait_for_user(repository, application_id, "NEEDS_AUTH", "Sign in to the employer site in the saved local browser session, then resume this application.")
@@ -839,7 +838,7 @@ def _process_claimed_application(repository: object, application_id: int, browse
     except Exception:
         return _wait_for_user(repository, application_id, "NEEDS_USER", "The form changed or a field could not be safely filled.")
     if after_fill.captcha_detected:
-        repository.hold_for_captcha(application_id, detected_url=application_url, note="Access challenge appeared while preparing the form")
+        repository.hold_for_captcha(application_id, note="Access challenge appeared while preparing the form")
         return "CAPTCHA_HOLD"
     if after_fill.authentication_required:
         return _wait_for_user(repository, application_id, "NEEDS_AUTH", "The employer session expired while preparing the form.")
@@ -990,7 +989,7 @@ def _process_claimed_application(repository: object, application_id: int, browse
             )
             if cancelled:
                 return _wait_for_user(repository, application_id, "NEEDS_USER", "The browser stopped before submission; review the form and resume when ready.")
-        if result.final_url and not is_same_public_origin(application_url, result.final_url):
+        if not result.captcha_detected and result.final_url and not is_same_public_origin(application_url, result.final_url):
             raise ValueError("Final confirmation URL changed to an unexpected origin")
         return record_submission_result(repository, application_id, result)
     except Exception:

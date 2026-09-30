@@ -20,6 +20,7 @@ class CVChoice:
     language: str
     score: int
     ats_score: int
+    text_check_performed: bool
     reasons: tuple[str, ...]
     checksum: str
 
@@ -152,7 +153,10 @@ def choose_application_cv(*, output_dir: Path, archived: list[dict[str, object]]
             choice_reasons = reasons
             if adjustment:
                 choice_reasons = (*reasons, f"Confirmed application outcomes influenced this archived CV choice ({adjustment:+d})")
-            reusable.append((score + adjustment, score, -index, CVChoice(path, "reused", family, language, score, int(item.get("ats_score", 0)), choice_reasons, checksum)))
+            reusable.append((score + adjustment, score, -index, CVChoice(
+                path, "reused", family, language, score, int(item.get("ats_score", 0)),
+                bool(item.get("text_check_performed")), choice_reasons, checksum,
+            )))
 
     if reusable:
         best_fit = max(item[1] for item in reusable)
@@ -195,4 +199,4 @@ def choose_application_cv(*, output_dir: Path, archived: list[dict[str, object]]
     reasons = ["No archived CV met the 85% role, language and evidence threshold", *match_reasons]
     if corrupt_archive_found:
         reasons.append("An archived file was excluded because its reviewed checksum was missing or no longer matched")
-    return CVChoice(path, "generated", family, language, match_score, report.score, tuple(reasons), checksum)
+    return CVChoice(path, "generated", family, language, match_score, report.score, True, tuple(reasons), checksum)

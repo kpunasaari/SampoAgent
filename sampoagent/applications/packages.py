@@ -29,8 +29,13 @@ def prepare_job_cv(repository: object, job: dict[str, object], storage_dir: Path
         checksum = sha256(path.read_bytes()).hexdigest()
         if not item.get("checksum") or checksum != str(item["checksum"]):
             raise ValueError("The selected archived CV checksum changed; re-upload and review the file")
-        choice = CVChoice(path, "reused", str(item["role_family"]), str(item["language"]), int(item["fit_score"]), int(item.get("ats_score", 0)), ("Candidate-selected archived CV",), checksum)
-        return PreparedCV(choice, "Candidate-selected archived CV.")
+        choice = CVChoice(
+            path, "reused", str(item["role_family"]), str(item["language"]),
+            int(item["fit_score"]), int(item.get("ats_score", 0)),
+            bool(item.get("text_check_performed")), ("Candidate-selected archived CV",), checksum,
+        )
+        text_check = f"{choice.ats_score}%" if choice.text_check_performed else "Not checked"
+        return PreparedCV(choice, f"Candidate-selected archived CV; CV text check {text_check}.")
     record_types = ("experience", "education", "certificate", "licence")
     records = {kind: repository.candidate_records(kind) for kind in record_types}
     choice = choose_application_cv(
@@ -38,7 +43,8 @@ def prepare_job_cv(repository: object, job: dict[str, object], storage_dir: Path
         facts=repository.rows("facts"), records=records,
         learning_adjustments=repository.cv_learning_adjustments(),
     )
-    note = f"Tailored CV {choice.strategy}; job evidence fit {choice.score}%; ATS text check {choice.ats_score}%; {', '.join(choice.reasons)}"
+    text_check = f"{choice.ats_score}%" if choice.text_check_performed else "Not checked"
+    note = f"Tailored CV {choice.strategy}; job evidence fit {choice.score}%; CV text check {text_check}; {', '.join(choice.reasons)}"
     return PreparedCV(choice, note)
 
 
@@ -98,7 +104,9 @@ def enqueue_eligible_applications(repository: object, storage_dir: Path) -> int:
             repository.archive_cv(
                 path=str(choice.path), checksum=choice.checksum, language=choice.language,
                 role_family=choice.role_family, source_job_id=int(job["id"]),
-                fit_score=choice.score, ats_score=choice.ats_score, strategy=choice.strategy,
+                fit_score=choice.score,
+                ats_score=choice.ats_score if choice.text_check_performed else None,
+                strategy=choice.strategy,
             )
             application_id = repository.queue_application(int(job["id"]), language=str(job["language"]), cv_path=str(choice.path), notes=prepared.note)
             copied = copy_cv_to_application(choice.path, storage_dir, application_id)

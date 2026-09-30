@@ -112,6 +112,7 @@
 - [x] Meslek önerilerini ülkeye özgü düzenlemeler, eğitim ve certificates ile genişlet. İlk Finlandiya pack'i seçili sağlık/sosyal bakım, erken çocukluk eğitimi ve özel güvenlik unvanları için resmi kaynaklı yalnızca “authority check” uyarısı üretir; bu uyarılar yasal hard gap/uygunsuzluk kararı değildir. Tam Finlandiya kapsaması ve diğer ülke pack'leri açık iştir.
 - [x] Hobi veya CV çıkarımını profesyonel deneyim gibi sunmama testini ekle; meslek kullanıcı seçmeden etkin arama hedefi olmaz.
 - [x] Teyitli yapılandırılmış iş geçmişi/eğitimi job ranking ve CV archive fit'ine dahil et; taslak geçmişin puanı veya PDF içeriğini etkilemediğini test et. Yalnız teyitli lisans/sertifika kaydı kendi birebir hard requirement'ını karşılayabilir.
+- [x] CV arşivinde işe/kanıta uyum ile parse edilmiş PDF'de teyitli metin bulunma kontrolünü ayrı etiketle; metin kontrolü ATS uyumluluğu veya işe alım başarısı iddiası olmasın. Kontrol edilmemiş eski/yüklenmiş CV ile gerçek `0%` sonucunu ayıran SQLite migration ve UI testi ekle.
 
 ### Task 4: İlan adaptörleri ve ATS form katmanını genişlet
 

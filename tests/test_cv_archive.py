@@ -107,6 +107,8 @@ def test_autopilot_enqueue_uses_verified_snapshot_and_archives_its_tailored_cv(t
     assert archive[0]["source_job_id"] == 1
     assert sha256(Path(application["cv_path"]).read_bytes()).hexdigest() == archive[0]["checksum"]
     assert "Tailored CV generated" in application["notes"]
+    assert "CV text check" in application["notes"]
+    assert "ATS text check" not in application["notes"]
     repository.connection.close()
 
 
@@ -176,6 +178,34 @@ def test_user_selected_archived_cv_also_requires_its_original_checksum(tmp_path:
         assert "checksum" in str(error).casefold()
     else:
         raise AssertionError("A changed archived CV must not be prepared for an application")
+
+
+def test_legacy_cv_archive_migration_marks_old_text_scores_unchecked(tmp_path: Path):
+    import sqlite3
+    from sampoagent.db.repository import Repository
+
+    database_path = tmp_path / "legacy-cv-archive.db"
+    connection = sqlite3.connect(database_path)
+    connection.execute(
+        "CREATE TABLE cv_archive (id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE, checksum TEXT NOT NULL, "
+        "language TEXT NOT NULL, role_family TEXT NOT NULL, source_job_id INTEGER, fit_score INTEGER NOT NULL DEFAULT 0, "
+        "ats_score INTEGER NOT NULL DEFAULT 0, strategy TEXT NOT NULL, created_at TEXT NOT NULL)"
+    )
+    connection.execute(
+        "INSERT INTO cv_archive(path, checksum, language, role_family, fit_score, ats_score, strategy, created_at) "
+        "VALUES ('/local/legacy.pdf', 'old-hash', 'en', 'universal', 0, 0, 'uploaded', '2026-09-30T00:00:00+00:00')"
+    )
+    connection.commit()
+    connection.close()
+
+    repository = Repository(database_path)
+    repository.initialize()
+
+    archive = repository.cv_archives()
+    assert len(archive) == 1
+    assert archive[0]["ats_score"] == 0
+    assert archive[0]["text_check_performed"] == 0
+    repository.connection.close()
 
 
 def test_confirmed_cv_outcomes_break_ties_only_between_qualified_templates(tmp_path: Path):

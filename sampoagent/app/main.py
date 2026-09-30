@@ -866,7 +866,12 @@ def create_app(
         selected_cv = str(choice.path)
         archive_notes = prepared.note
         repository.add_document(kind="generated_cv", path=selected_cv, checksum=choice.checksum)
-        repository.archive_cv(path=selected_cv, checksum=choice.checksum, language=choice.language, role_family=choice.role_family, source_job_id=job_id, fit_score=choice.score, ats_score=choice.ats_score, strategy=choice.strategy)
+        repository.archive_cv(
+            path=selected_cv, checksum=choice.checksum, language=choice.language,
+            role_family=choice.role_family, source_job_id=job_id, fit_score=choice.score,
+            ats_score=choice.ats_score if choice.text_check_performed else None,
+            strategy=choice.strategy,
+        )
         try:
             application_id = repository.queue_application(job_id, language=str(job["language"]), cv_path=selected_cv, notes=archive_notes)
             application_cv = copy_cv_to_application(selected_cv, app.state.storage_dir, application_id)
@@ -1796,9 +1801,14 @@ def create_app(
             if selected_job
             else ""
         )
-        archive_rows = "".join(f"<tr><td><a href='/cvs/archive/{item['id']}'>{escape(Path(str(item['path'])).name)}</a></td><td>{escape(str(item['strategy']))}</td><td>{escape(str(item['role_family']))}</td><td>{escape(str(item['language']))}</td><td>{item['fit_score']}%</td><td>{item['ats_score']}%</td><td>{escape(str(item['checksum'])[:12])}</td></tr>" for item in repository.cv_archives()) or "<tr><td colspan='7'>No CVs archived yet.</td></tr>"
+        def cv_text_check_label(item: dict[str, object]) -> str:
+            if not bool(item.get("text_check_performed")):
+                return "Not checked"
+            return f"{int(item.get('ats_score') or 0)}%"
+
+        archive_rows = "".join(f"<tr><td><a href='/cvs/archive/{item['id']}'>{escape(Path(str(item['path'])).name)}</a></td><td>{escape(str(item['strategy']))}</td><td>{escape(str(item['role_family']))}</td><td>{escape(str(item['language']))}</td><td>{item['fit_score']}%</td><td>{cv_text_check_label(item)}</td><td>{escape(str(item['checksum'])[:12])}</td></tr>" for item in repository.cv_archives()) or "<tr><td colspan='7'>No CVs archived yet.</td></tr>"
         notice_html = f"<p class='notice' role='status'>{escape(notice)}</p>" if notice else ""
-        return _page("CVs", f"<section><p>Upload TXT, DOCX, or text-based PDF CVs. English and Finnish skill, language, licence, certificate, work and education sections are checked locally. Extracted claims stay unconfirmed until reviewed and include source spans where available. Scanned PDFs need an optional OCR provider or manual text entry; the app never invents OCR results.</p>{notice_html}<form method='post' action='/cvs/upload' enctype='multipart/form-data'><label>CV file <input name='file' type='file' accept='.txt,.docx,.pdf' required></label> <label>Language <select name='language'><option value='fi'>Finnish</option><option value='en'>English</option></select></label><label>Role family <select name='role_family'>{families}</select></label><button>Upload and extract</button></form></section><section><h3>Generate confirmed-fact CV</h3><form method='post' action='/cvs/generate'>{job_context}<label>Language <select name='language'>{language_options}</select></label><label>Role family <select name='role_family'>{families}</select></label><label>Target company (optional) <input name='company' value='{escape(str(selected_job['company'])) if selected_job else ''}'></label><label>Filename pattern <input name='filename_pattern' value='{{first}}_{{last}}_{{role}}_{{language}}.pdf'></label><p class='notice'>Available placeholders: first, last, fullname, role, company, language, version.</p><button>Generate PDF</button></form></section><section><h3>CV archive</h3><p>Job-specific CVs and uploaded CVs remain available here with a fit score and content checksum.</p><table><tr><th>File</th><th>Method</th><th>Role</th><th>Language</th><th>Fit</th><th>Checksum</th></tr>{archive_rows}</table></section><section><h3>Custom template metadata</h3><p>Metadata only: arbitrary DOCX layouts are not modified.</p>{template_form}<table><tr><th>Name</th><th>Language</th><th>Role family</th><th>Support</th></tr>{template_rows}</table></section>")
+        return _page("CVs", f"<section><p>Upload TXT, DOCX, or text-based PDF CVs. English and Finnish skill, language, licence, certificate, work and education sections are checked locally. Extracted claims stay unconfirmed until reviewed and include source spans where available. Scanned PDFs need an optional OCR provider or manual text entry; the app never invents OCR results.</p>{notice_html}<form method='post' action='/cvs/upload' enctype='multipart/form-data'><label>CV file <input name='file' type='file' accept='.txt,.docx,.pdf' required></label> <label>Language <select name='language'><option value='fi'>Finnish</option><option value='en'>English</option></select></label><label>Role family <select name='role_family'>{families}</select></label><button>Upload and extract</button></form></section><section><h3>Generate confirmed-fact CV</h3><form method='post' action='/cvs/generate'>{job_context}<label>Language <select name='language'>{language_options}</select></label><label>Role family <select name='role_family'>{families}</select></label><label>Target company (optional) <input name='company' value='{escape(str(selected_job['company'])) if selected_job else ''}'></label><label>Filename pattern <input name='filename_pattern' value='{{first}}_{{last}}_{{role}}_{{language}}.pdf'></label><p class='notice'>Available placeholders: first, last, fullname, role, company, language, version.</p><button>Generate PDF</button></form></section><section><h3>CV archive</h3><p>Job-specific CVs and uploaded CVs remain available here with a role/job evidence-fit score and content checksum. The CV text check measures presence of expected confirmed candidate text in the parsed PDF; it is not an ATS compatibility or hiring-success score.</p><table><tr><th>File</th><th>Method</th><th>Role</th><th>Language</th><th>Fit</th><th>CV text check</th><th>Checksum</th></tr>{archive_rows}</table></section><section><h3>Custom template metadata</h3><p>Metadata only: arbitrary DOCX layouts are not modified.</p>{template_form}<table><tr><th>Name</th><th>Language</th><th>Role family</th><th>Support</th></tr>{template_rows}</table></section>")
 
     @app.post("/cvs/templates")
     def register_cv_template(name: str = Form(...), language: str = Form(...), role_family: str = Form(...), notes: str = Form("")) -> RedirectResponse:
@@ -1859,7 +1869,7 @@ def create_app(
             record_drafts += int(created is not None)
         checksum = sha256(payload).hexdigest()
         repository.add_document(kind="uploaded_cv", path=str(stored_path), checksum=checksum)
-        repository.archive_cv(path=str(stored_path), checksum=checksum, language=language, role_family=role_family, source_job_id=None, fit_score=0, ats_score=0, strategy="uploaded")
+        repository.archive_cv(path=str(stored_path), checksum=checksum, language=language, role_family=role_family, source_job_id=None, fit_score=0, strategy="uploaded")
         notice = ocr_warning or result.warning or f"CV saved locally. {len(result.facts)} draft claims are ready for review, plus {record_drafts} structured work/education records; none were confirmed automatically."
         return RedirectResponse("/profile?notice=" + quote(notice), status_code=303)
 
@@ -1897,7 +1907,7 @@ def create_app(
         repository.add_document(kind="generated_cv", path=str(path), checksum=checksum)
         repository.archive_cv(path=str(path), checksum=checksum, language=language, role_family=role_family, source_job_id=job_id, fit_score=0, ats_score=report.score, strategy="generated")
         download_path = "/cvs/generated/" + quote(path.name)
-        return _page("CV Generated", f"<section><p>Generated: <a href='{escape(download_path)}'>{escape(path.name)}</a></p><p>ATS readability: {report.score}%</p></section>", path="/cvs")
+        return _page("CV Generated", f"<section><p>Generated: <a href='{escape(download_path)}'>{escape(path.name)}</a></p><p>CV text check: {report.score}% expected confirmed candidate text was found in the parsed PDF. This is not an ATS compatibility or hiring-success score.</p></section>", path="/cvs")
 
     @app.get("/cvs/generated/{filename}")
     def download_generated_cv(filename: str) -> FileResponse:

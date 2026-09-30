@@ -1107,7 +1107,7 @@ def test_synthetic_employer_e2e_posts_exact_cv_once_and_records_same_origin_rece
     repository.archive_cv(
         path=str(weak_template), checksum=sha256(weak_template.read_bytes()).hexdigest(),
         language="en", role_family="universal", source_job_id=None,
-        fit_score=30, ats_score=100, strategy="uploaded",
+        fit_score=30, strategy="uploaded",
     )
     host = "careers.northstar-logistics.fi"
     html = (Path(__file__).parent / "fixtures" / "ats" / "laura" / "application.html").read_text(encoding="utf-8")

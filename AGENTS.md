@@ -200,3 +200,8 @@ For job-search and application tasks in this repository, use `.agents/skills/sam
 
 - The deterministic EN/FI/SV risk gate now holds personal employment-discipline/termination, police-caution/warning, and drug/alcohol screening questions as HIGH. Full Autopilot cannot submit these even with a current grant; tested role-experience questions remain MEDIUM. This phrase set is intentionally conservative but not exhaustive, and does not make legal determinations.
 - TDD regression tests cover risk classification and the final Autopilot submission gate across all three UI languages, plus role-experience false positives. Full suite: `py -m pytest -q` → 563 passed with the existing Starlette/httpx deprecation warning; compileall and CLI help passed. Employer-controlled ATS staging, cross-platform/OS egress proof, supervised privacy review and supervised pilot remain open release gates.
+
+## CAPTCHA outcome privacy — 2026-09-30
+
+- The CAPTCHA queue records only the user's selected outcome and fixed generic confirmation evidence. It no longer solicits or stores pasted employer-page text, which could contain candidate identifiers or other personal information. CAPTCHA submission receipts still have no invented confirmation URL or reference ID.
+- Test-first regression demonstrated both the unnecessary free-text field and PII retention in timeline/evidence; both are removed. Full local suite and release gates are recorded in the implementation plan. This does not imply employer staging or live submission validation.

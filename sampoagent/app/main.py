@@ -932,7 +932,7 @@ def create_app(
                 start = "<span class='status status-review'>Waiting for the current CAPTCHA task to finish</span>"
                 instructions = "<p>This challenge is queued. Its official application page stays closed until it becomes the active task.</p>"
                 application_link = ""
-            finish = f"<form method='post' action='/captcha/{task['id']}/finish'><label>Outcome <select name='outcome'><option value='submitted'>I submitted and saw confirmation</option><option value='not_submitted'>Not submitted</option><option value='skip'>Skip this job</option></select></label><label>Employer confirmation (required if submitted) <input name='confirmation_message' maxlength='300'></label><button>Record outcome</button></form>" if task["state"] == "IN_PROGRESS" else ""
+            finish = f"<form method='post' action='/captcha/{task['id']}/finish'><label>Your outcome <select name='outcome'><option value='submitted'>I submitted and saw confirmation</option><option value='not_submitted'>Not submitted</option><option value='skip'>Skip this job</option></select></label><p>Only a fixed status note is saved; do not paste employer-page text or personal information here.</p><button>Record outcome</button></form>" if task["state"] == "IN_PROGRESS" else ""
             cards.append(f"<article class='metric-card'><h3>{escape(str(task['title']))} — {escape(str(task['company']))}</h3><p>Application {task['application_id']} · {escape(str(task['state']))}</p>{instructions}{application_link}{start}{finish}</article>")
         body = "<section><h2>CAPTCHA tasks</h2><p>Blocked applications stay here until you handle them individually. SampoAgent will not solve or bypass CAPTCHA.</p>" + ("".join(cards) or "<p class='empty-state'>No CAPTCHA tasks are waiting.</p>") + "</section>"
         return _page("CAPTCHA Queue", body)
@@ -960,9 +960,9 @@ def create_app(
         return RedirectResponse("/captcha", status_code=303)
 
     @app.post("/captcha/{task_id}/finish")
-    def finish_captcha(task_id: int, outcome: str = Form(...), confirmation_message: str = Form("")) -> RedirectResponse:
+    def finish_captcha(task_id: int, outcome: str = Form(...)) -> RedirectResponse:
         try:
-            repository.finish_captcha_task(task_id, outcome=outcome, confirmation_message=confirmation_message)
+            repository.finish_captcha_task(task_id, outcome=outcome)
         except ValueError as error:
             return RedirectResponse("/captcha?notice=" + quote("Could not save the CAPTCHA outcome. Check the outcome and try again."), status_code=303)
         return RedirectResponse("/captcha", status_code=303)

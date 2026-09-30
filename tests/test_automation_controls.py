@@ -244,7 +244,7 @@ def test_captcha_tasks_accumulate_and_are_handled_one_at_a_time():
         assert "one at a time" in str(error)
     else:
         raise AssertionError("A second CAPTCHA task started while the first was active")
-    repository.finish_captcha_task(first, outcome="submitted", confirmation_message="Application received")
+    repository.finish_captcha_task(first, outcome="submitted")
     assert repository.application(first)["status"] == "APPLIED_MANUAL"
     assert repository.application(second)["status"] == "CAPTCHA_HOLD"
     repository.connection.close()
@@ -281,7 +281,7 @@ def test_concurrent_captcha_completion_records_one_terminal_outcome_and_one_rece
     def finish(instance):
         try:
             instance.finish_captcha_task(
-                task_id, outcome="submitted", confirmation_message="Application received",
+                task_id, outcome="submitted",
             )
             return "completed"
         except ValueError:
@@ -577,7 +577,6 @@ def test_legacy_captcha_task_link_and_manual_receipt_use_reviewed_job_url():
     repository.finish_captcha_task(
         task_id,
         outcome="submitted",
-        confirmation_message="Application received",
     )
     receipt = repository.submission_evidence_for_application(application_id)[0]
     assert receipt["final_url"] == ""
@@ -597,13 +596,14 @@ def test_manual_captcha_evidence_ui_does_not_label_application_url_as_confirmati
     client.post("/captcha/1/start")
     client.post(
         "/captcha/1/finish",
-        data={"outcome": "submitted", "confirmation_message": "Application received"},
+        data={"outcome": "submitted"},
     )
 
     page = client.get("/applications")
 
     assert "Manual CAPTCHA report" in page.text
     assert "no confirmation URL was captured" in page.text
+    assert "Candidate reported seeing an employer application confirmation." in page.text
     assert "href='https://careers.northstar-logistics.fi/apply/warehouse'>Confirmation URL</a>" not in page.text
 
 
@@ -629,7 +629,7 @@ def test_captcha_ui_omits_link_when_legacy_jobs_no_longer_have_a_safe_public_url
 
     client.post(
         "/captcha/1/finish",
-        data={"outcome": "submitted", "confirmation_message": "Application received"},
+        data={"outcome": "submitted"},
     )
     assert repository.connection.execute("SELECT state FROM captcha_tasks WHERE id=1").fetchone()[0] == "COMPLETED"
     assert repository.application(application_id)["status"] == "APPLIED_MANUAL"
@@ -654,10 +654,59 @@ def test_captcha_hold_is_durable_when_current_reviewed_url_is_unsafe():
     repository.finish_captcha_task(
         task_id,
         outcome="submitted",
-        confirmation_message="Application received",
     )
     assert repository.application(application_id)["status"] == "APPLIED_MANUAL"
     assert repository.submission_evidence_for_application(application_id)[0]["final_url"] == ""
+    repository.connection.close()
+
+
+def test_manual_captcha_evidence_form_does_not_request_free_text():
+    from fastapi.testclient import TestClient
+    from sampoagent.app.main import create_app
+
+    app = create_app(database_path=":memory:", demo_data=True)
+    _set_public_captcha_test_urls(app.state.repository)
+    client = TestClient(app)
+    client.post("/queue/prepare/1")
+    client.post("/queue/1/captcha")
+    client.post("/captcha/1/start")
+
+    active_page = client.get("/captcha")
+    assert "name='confirmation_message'" not in active_page.text
+    assert "I submitted and saw confirmation" in active_page.text
+    app.state.repository.connection.close()
+
+
+def test_manual_captcha_outcome_stores_only_fixed_confirmation_evidence():
+    from fastapi.testclient import TestClient
+    from sampoagent.app.main import create_app
+
+    app = create_app(database_path=":memory:", demo_data=True)
+    repository = app.state.repository
+    _set_public_captcha_test_urls(repository)
+    client = TestClient(app)
+    client.post("/queue/prepare/1")
+    client.post("/queue/1/captcha")
+    client.post("/captcha/1/start")
+
+    client.post(
+        "/captcha/1/finish",
+        data={
+            "outcome": "submitted",
+            "confirmation_message": "Application received; candidate.private@example.test +358 40 000 0000",
+        },
+    )
+
+    evidence = repository.submission_evidence_for_application(1)[0]
+    timeline = repository.connection.execute(
+        "SELECT note FROM application_timeline WHERE application_id=1 AND status='APPLIED_MANUAL'",
+    ).fetchone()[0]
+    assert evidence["confirmation_message"] == "Candidate reported seeing an employer application confirmation."
+    assert evidence["confirmation_id"] is None
+    assert "candidate.private@example.test" not in evidence["confirmation_message"]
+    assert "+358 40 000 0000" not in evidence["confirmation_message"]
+    assert "candidate.private@example.test" not in timeline
+    assert "+358 40 000 0000" not in timeline
     repository.connection.close()
 
 

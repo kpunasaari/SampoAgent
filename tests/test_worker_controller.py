@@ -130,3 +130,53 @@ def test_controller_does_not_start_while_emergency_stop_is_active(tmp_path):
     controller.close(timeout=1)
 
     assert not cycle_started.is_set()
+
+
+def test_controller_recovers_browser_after_temporary_factory_and_cycle_failures(tmp_path):
+    database = tmp_path / "recovering.db"
+    _authorized_database(database)
+    factory_failed = Event()
+    cycle_failed = Event()
+    cycle_recovered = Event()
+    created_browsers = []
+    factory_attempts = 0
+    cycle_attempts = 0
+
+    def make_browser(profile_dir):
+        nonlocal factory_attempts
+        factory_attempts += 1
+        if factory_attempts == 1:
+            factory_failed.set()
+            raise RuntimeError("private browser diagnostic must not escape")
+        browser = FakeBrowser(profile_dir)
+        created_browsers.append(browser)
+        return browser
+
+    def run_cycle(repository, browser, **kwargs):
+        nonlocal cycle_attempts
+        cycle_attempts += 1
+        if cycle_attempts == 1:
+            cycle_failed.set()
+            raise RuntimeError("private provider diagnostic must not escape")
+        cycle_recovered.set()
+
+    controller = AutopilotWorkerController(
+        database,
+        tmp_path / "application_data",
+        browser_factory=make_browser,
+        cycle_runner=run_cycle,
+        interval_seconds=5,
+    )
+
+    assert controller.sync() == "started"
+    assert factory_failed.wait(2)
+    assert controller.is_running, "temporary browser failure should keep the authorized worker alive"
+    assert cycle_failed.wait(7)
+    assert cycle_recovered.wait(12), "the worker should create a fresh browser and resume after a failed cycle"
+    controller.close(timeout=2)
+
+    assert factory_attempts >= 3
+    assert cycle_attempts >= 2
+    assert len(created_browsers) >= 2
+    assert created_browsers[0].closed
+    assert controller.state == "stopped"

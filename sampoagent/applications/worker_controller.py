@@ -16,6 +16,15 @@ def _browser_factory(profile_dir: Path) -> object:
     return PlaywrightBrowserAgent(profile_dir)
 
 
+def _close_browser(browser: object | None) -> None:
+    if browser is None:
+        return
+    try:
+        browser.close()
+    except Exception:
+        pass
+
+
 class AutopilotWorkerController:
     """Start/stop one local worker as application settings and grants change.
 
@@ -129,14 +138,16 @@ class AutopilotWorkerController:
     def _run(self, stop_event: Event) -> None:
         browser: object | None = None
         terminal_state = "stopped"
+        last_discovery = 0.0
         try:
-            browser = self.browser_factory(self.storage_dir / "browser-profile")
-            last_discovery = 0.0
             while not stop_event.is_set():
-                repository = Repository(self.database_path)
+                repository: Repository | None = None
                 try:
+                    repository = Repository(self.database_path)
                     if not self._eligible(repository):
                         break
+                    if browser is None:
+                        browser = self.browser_factory(self.storage_dir / "browser-profile")
                     now = monotonic()
                     discover = now - last_discovery >= self.discovery_interval_seconds
                     self.cycle_runner(
@@ -154,12 +165,17 @@ class AutopilotWorkerController:
                             self._state = "running"
                 except Exception:
                     # Provider/browser error details can contain candidate data or
-                    # secrets. The persistent worker status is intentionally generic.
+                    # secrets. Drop a possibly disconnected browser and retry only
+                    # after the normal polling delay, with a fresh authorization
+                    # check before the next cycle.
+                    _close_browser(browser)
+                    browser = None
                     with self._lock:
                         if not stop_event.is_set():
-                            self._state = "error"
+                            self._state = "recovering"
                 finally:
-                    repository.connection.close()
+                    if repository is not None:
+                        repository.connection.close()
                 if stop_event.wait(self.interval_seconds):
                     break
         except Exception:
@@ -167,11 +183,7 @@ class AutopilotWorkerController:
             # candidate value or secret in the console or dashboard.
             terminal_state = "error"
         finally:
-            if browser is not None:
-                try:
-                    browser.close()
-                except Exception:
-                    pass
+            _close_browser(browser)
             should_restart = False
             with self._lock:
                 self._state = terminal_state

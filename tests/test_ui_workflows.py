@@ -47,6 +47,18 @@ def test_settings_groups_controls_without_changing_the_form_endpoint() -> None:
     assert "action='/settings'" in page.text
 
 
+def test_settings_explains_local_autopilot_availability_and_recovery_contract() -> None:
+    client = TestClient(create_app(database_path=":memory:"))
+
+    page = client.get("/settings")
+
+    copy = page.text.casefold()
+    assert "only while your machine, the app and your interactive user session are available" in copy
+    assert "resumes on the next polling cycle after wake or network recovery" in copy
+    assert "uncertain submit or email attempts are never retried" in copy
+    assert "does not install an operating-system login startup task" in copy
+
+
 def test_dashboard_and_queue_expose_worker_and_wait_observability(tmp_path: Path) -> None:
     app = create_app(database_path=tmp_path / "worker-observability.db", demo_data=True)
     repository = app.state.repository

@@ -47,3 +47,42 @@ def test_explicit_source_category_preference_filters_the_search_plan():
         ],
     )
     assert {query.source_id for query in plan.queries} == {1}
+
+
+def test_imported_job_keeps_source_category_after_source_definition_is_deleted():
+    from dataclasses import replace
+
+    from sampoagent.db.repository import Repository
+    from sampoagent.jobs.service import normalize_job
+
+    repository = Repository(":memory:")
+    repository.initialize()
+    source_id = repository.add_source(
+        name="City of Vantaa",
+        url="https://vantaa.example/jobs",
+        country="Finland",
+        source_type="public-sector board",
+    )
+    job = replace(
+        normalize_job(
+            title="Cleaner",
+            company="City of Vantaa",
+            location="Vantaa",
+            description="Full-time cleaning role.",
+            application_url="https://vantaa.example/jobs/cleaner",
+        ),
+        source_id=source_id,
+        source_name="City of Vantaa",
+        source_url="https://vantaa.example/jobs",
+    )
+    job_id = repository.add_job(job, "PARTIALLY_VERIFIED")
+
+    assert job_id is not None
+    assert repository.job(job_id)["source_type"] == "public-sector board"
+    repository.connection.execute("ALTER TABLE jobs DROP COLUMN source_type")
+    repository.connection.commit()
+    repository.initialize()
+    assert repository.job(job_id)["source_type"] == "public-sector board"
+    repository.delete_source(source_id)
+    assert repository.job(job_id)["source_type"] == "public-sector board"
+    repository.connection.close()

@@ -8,8 +8,52 @@ def hard_requirement_failures(*, required: list[str], confirmed_facts: list[str]
     return [f"Missing mandatory requirement: {requirement}" for requirement in required if requirement.casefold() not in confirmed]
 
 
+def source_category_allowed(
+    *,
+    source_type: object,
+    preferences: Mapping[str, object],
+    source_known: bool = True,
+) -> bool:
+    """Apply explicit source-category exclusions consistently across search and matching."""
+    category = " ".join(
+        str(source_type or "").casefold().replace("-", " ").replace("_", " ").split()
+    )
+
+    def opted_out(key: str) -> bool:
+        value = preferences.get(key, "yes")
+        if value is False or value == 0:
+            return True
+        return isinstance(value, str) and value.strip().casefold() in {"no", "false", "off", "0"}
+
+    public_sector = any(
+        marker in category
+        for marker in ("public sector", "government", "municipal board", "public service")
+    )
+    recruitment_agency = any(
+        marker in category
+        for marker in ("recruitment agency", "staffing agency", "employment agency", "personnel agency")
+    )
+    if not source_known and (
+        opted_out("include_public_sector") or opted_out("include_recruitment_agencies")
+    ):
+        return False
+    if public_sector and opted_out("include_public_sector"):
+        return False
+    if recruitment_agency and opted_out("include_recruitment_agencies"):
+        return False
+    return True
+
+
 def matches_preferences(*, job: Mapping[str, object], preferences: Mapping[str, object]) -> bool:
     """Apply only explicit, deterministic user filters to normalized job data."""
+    source_type = job.get("source_type", "")
+    source_known = job.get("source_id") is None or bool(str(source_type or "").strip())
+    if not source_category_allowed(
+        source_type=source_type,
+        preferences=preferences,
+        source_known=source_known,
+    ):
+        return False
     location = str(job.get("location", "")).casefold()
     locations = [item.strip().casefold() for item in str(preferences.get("locations", "")).split(",") if item.strip()]
     if locations and not any(item in location for item in locations):

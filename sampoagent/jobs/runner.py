@@ -44,7 +44,14 @@ def _policy_confirmed(value: object) -> bool:
     return value is True or value == 1 or (isinstance(value, str) and value.strip().casefold() in {"1", "true", "yes"})
 
 
-def is_relevant_job(job: Any, *, plan: SearchPlan, preferences: dict[str, object]) -> bool:
+def is_relevant_job(
+    job: Any,
+    *,
+    plan: SearchPlan,
+    preferences: dict[str, object],
+    source_type: str | None = None,
+    source_id: int | None = None,
+) -> bool:
     """Keep feed/API imports tied to explicit profile terms and saved filters."""
     def field(name: str) -> str:
         value = job.get(name, "") if isinstance(job, Mapping) else getattr(job, name, "")
@@ -55,6 +62,8 @@ def is_relevant_job(job: Any, *, plan: SearchPlan, preferences: dict[str, object
         "company": field("company"),
         "location": field("location"),
         "description": field("description"),
+        "source_type": source_type if source_type is not None else field("source_type"),
+        "source_id": source_id if source_id is not None else field("source_id"),
     }
     if not plan.terms or not matches_preferences(job=normalized, preferences=preferences):
         return False
@@ -173,7 +182,16 @@ def run_discovery(
         if adapter is not None:
             try:
                 jobs = adapter.search(source, plan, timeout_seconds=4.0, max_bytes=2_000_000)
-                jobs = [job for job in jobs if is_relevant_job(job, plan=plan, preferences=repository.preferences())]
+                jobs = [
+                    job for job in jobs
+                    if is_relevant_job(
+                        job,
+                        plan=plan,
+                        preferences=repository.preferences(),
+                        source_type=str(source.get("source_type", "")),
+                        source_id=source_id,
+                    )
+                ]
                 found = len(jobs)
                 for job in jobs:
                     verification = verification_state(

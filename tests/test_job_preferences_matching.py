@@ -11,3 +11,24 @@ def test_explicit_include_and_exclude_filters_apply_without_inventing_missing_da
     assert not matches_preferences(job=job, preferences={"title_exclude": "Cleaner"})
     assert not matches_preferences(job=job, preferences={"employer_include": "Other Oy"})
     assert not matches_preferences(job=job, preferences={"locations_exclude": "Vantaa"})
+
+
+def test_opted_out_source_categories_are_excluded_from_existing_job_matches():
+    preferences = {"include_public_sector": "no", "include_recruitment_agencies": "no"}
+
+    assert not matches_preferences(
+        job={"title": "Cleaner", "company": "City of Vantaa", "source_type": "public-sector board"},
+        preferences=preferences,
+    )
+    assert not matches_preferences(
+        job={"title": "Cleaner", "company": "Example Oy", "source_type": "Recruitment_Agency"},
+        preferences=preferences,
+    )
+    assert matches_preferences(
+        job={"title": "Cleaner", "company": "Example Oy", "source_type": "job board"},
+        preferences=preferences,
+    )
+    assert not matches_preferences(
+        job={"title": "Cleaner", "company": "Unknown source", "source_id": 91, "source_type": ""},
+        preferences=preferences,
+    )

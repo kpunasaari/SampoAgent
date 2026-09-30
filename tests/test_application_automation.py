@@ -145,6 +145,32 @@ def test_autopilot_holds_job_outside_selected_roles_before_opening_browser(tmp_p
     repository.connection.close()
 
 
+def test_autopilot_holds_job_from_an_opted_out_source_category_before_opening_browser(tmp_path):
+    repository, application_id = _authorized_repository(tmp_path)
+    source = repository.rows("job_sources")[0]
+    repository.connection.execute(
+        "UPDATE job_sources SET source_type='public-sector board' WHERE id=?", (source["id"],)
+    )
+    repository.connection.execute(
+        "UPDATE jobs SET source_id=?, source_name=?, source_url=?, source_type='public-sector board' WHERE id=1",
+        (source["id"], source["name"], source["url"]),
+    )
+    repository.connection.commit()
+    repository.mark_job_user_reviewed(1, reviewed_current=True)
+    repository.save_preferences({"include_public_sector": "no"})
+    repository.revoke_autopilot("Job source category preference changed")
+    repository.grant_autopilot()
+    browser = FakeBrowser(_basic_fields())
+
+    result = process_application(repository, application_id, browser)
+
+    assert result == "BLOCKED"
+    assert browser.opened == []
+    assert browser.filled == {}
+    assert browser.submitted == 0
+    repository.connection.close()
+
+
 def test_autopilot_grant_is_invalidated_by_career_profile_or_source_policy_changes(tmp_path):
     repository, _application_id = _authorized_repository(tmp_path)
     assert repository.autopilot_authorized()

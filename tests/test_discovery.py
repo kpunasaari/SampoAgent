@@ -1,4 +1,5 @@
-from sampoagent.jobs.discovery import build_search_plan
+from sampoagent.jobs.discovery import SearchPlan, build_search_plan
+from sampoagent.jobs.runner import is_relevant_job
 
 
 def test_search_plan_uses_confirmed_profile_targets_and_locations() -> None:
@@ -119,3 +120,13 @@ def test_discovery_runs_keep_a_source_snapshot_after_source_deletion() -> None:
 
     assert repository.latest_discovery_run()["status"] == "completed"
     assert repository.discovery_source_results(run_id)[0]["source_name"] == "Duunitori"
+
+
+def test_discovery_rechecks_source_category_preferences_for_each_imported_job() -> None:
+    plan = SearchPlan(terms=("Cleaner",), locations=(), queries=())
+
+    assert not is_relevant_job(
+        {"title": "Cleaner", "company": "City of Vantaa", "source_type": "public-sector board"},
+        plan=plan,
+        preferences={"include_public_sector": "no"},
+    )

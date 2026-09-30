@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Mapping, Sequence
 from urllib.parse import quote_plus, urlsplit
 
+from sampoagent.jobs.matching import source_category_allowed
 from sampoagent.jobs.service import detect_language
 
 
@@ -36,10 +37,12 @@ def eligible_sources(sources: Sequence[Mapping[str, object]], preferences: Mappi
     for source in sources:
         if not _enabled(source):
             continue
-        source_type = str(source.get("source_type", "")).casefold()
-        if preferences.get("include_public_sector", "yes") == "no" and "public-sector" in source_type:
-            continue
-        if preferences.get("include_recruitment_agencies", "yes") == "no" and "recruitment agency" in source_type:
+        source_type = source.get("source_type", "")
+        if not source_category_allowed(
+            source_type=source_type,
+            preferences=preferences,
+            source_known=bool(str(source_type or "").strip()),
+        ):
             continue
         result.append(source)
     return tuple(result)

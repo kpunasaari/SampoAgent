@@ -100,7 +100,7 @@ class Repository:
             CREATE TABLE IF NOT EXISTS esco_skills (concept_uri TEXT NOT NULL, language TEXT NOT NULL, label TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', PRIMARY KEY(concept_uri, language));
             CREATE TABLE IF NOT EXISTS esco_occupation_skills (occupation_uri TEXT NOT NULL, skill_uri TEXT NOT NULL, importance TEXT NOT NULL CHECK(importance IN ('ESSENTIAL','OPTIONAL','UNSPECIFIED')), PRIMARY KEY(occupation_uri, skill_uri));
             CREATE TABLE IF NOT EXISTS job_sources (id INTEGER PRIMARY KEY, name TEXT NOT NULL, url TEXT NOT NULL, country TEXT NOT NULL, source_type TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1, capability TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS jobs (id INTEGER PRIMARY KEY, title TEXT NOT NULL, company TEXT NOT NULL, location TEXT, language TEXT NOT NULL, description TEXT NOT NULL, application_url TEXT NOT NULL, fingerprint TEXT UNIQUE NOT NULL, verification_state TEXT NOT NULL, deadline TEXT, source_id INTEGER, source_name TEXT NOT NULL DEFAULT '', source_url TEXT NOT NULL DEFAULT '', verified_at TEXT);
+            CREATE TABLE IF NOT EXISTS jobs (id INTEGER PRIMARY KEY, title TEXT NOT NULL, company TEXT NOT NULL, location TEXT, language TEXT NOT NULL, description TEXT NOT NULL, application_url TEXT NOT NULL, fingerprint TEXT UNIQUE NOT NULL, verification_state TEXT NOT NULL, deadline TEXT, source_id INTEGER, source_name TEXT NOT NULL DEFAULT '', source_url TEXT NOT NULL DEFAULT '', source_type TEXT NOT NULL DEFAULT '', verified_at TEXT);
             CREATE TABLE IF NOT EXISTS job_verifications (id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL, method TEXT NOT NULL, source_id INTEGER, source_url TEXT NOT NULL, evidence_summary TEXT NOT NULL, verified_at TEXT NOT NULL, snapshot_hash TEXT NOT NULL DEFAULT '', FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE);
             CREATE TABLE IF NOT EXISTS job_overrides (job_id INTEGER PRIMARY KEY, decision TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, FOREIGN KEY(job_id) REFERENCES jobs(id));
             CREATE TABLE IF NOT EXISTS applications (id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL, status TEXT NOT NULL, queue_state TEXT NOT NULL, language TEXT NOT NULL, cv_path TEXT, notes TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(job_id) REFERENCES jobs(id));
@@ -172,10 +172,15 @@ class Repository:
             ("source_id", "INTEGER"),
             ("source_name", "TEXT NOT NULL DEFAULT ''"),
             ("source_url", "TEXT NOT NULL DEFAULT ''"),
+            ("source_type", "TEXT NOT NULL DEFAULT ''"),
             ("verified_at", "TEXT"),
         ):
             if name not in job_columns:
                 self.connection.execute(f"ALTER TABLE jobs ADD COLUMN {name} {declaration}")
+        self.connection.execute(
+            "UPDATE jobs SET source_type=COALESCE((SELECT source_type FROM job_sources WHERE job_sources.id=jobs.source_id), '') "
+            "WHERE source_type='' AND source_id IS NOT NULL"
+        )
         verification_columns = {row[1] for row in self.connection.execute("PRAGMA table_info(job_verifications)")}
         if "snapshot_hash" not in verification_columns:
             self.connection.execute("ALTER TABLE job_verifications ADD COLUMN snapshot_hash TEXT NOT NULL DEFAULT ''")
@@ -822,9 +827,12 @@ class Repository:
         if verification not in {"UNVERIFIED", "PARTIALLY_VERIFIED", "EXPIRED"}:
             # Only an audit-backed verification method may elevate a job.
             verification = "PARTIALLY_VERIFIED"
+        source_id = getattr(job, "source_id", None)
+        source = self.source(int(source_id)) if source_id is not None else None
+        source_type = str(getattr(job, "source_type", "") or (source or {}).get("source_type", ""))
         try:
             cursor = self.connection.execute(
-                "INSERT INTO jobs(title, company, location, language, description, application_url, fingerprint, verification_state, deadline, source_id, source_name, source_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO jobs(title, company, location, language, description, application_url, fingerprint, verification_state, deadline, source_id, source_name, source_url, source_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     job.title,
                     job.company,
@@ -835,9 +843,10 @@ class Repository:
                     job.fingerprint,
                     verification,
                     getattr(job, "deadline", None).isoformat() if getattr(job, "deadline", None) else None,
-                    getattr(job, "source_id", None),
+                    source_id,
                     getattr(job, "source_name", ""),
                     getattr(job, "source_url", ""),
+                    source_type,
                 ),
             )
         except sqlite3.IntegrityError:

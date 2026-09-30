@@ -93,13 +93,21 @@ def test_learning_digest_suppresses_groups_below_five_confirmed_outcomes(tmp_pat
 def test_application_receipt_is_not_a_hiring_outcome_or_learning_signal(tmp_path):
     repository = Repository(tmp_path / "receipt-learning.db")
     _seed_learning_history(repository, tmp_path)
+    latest_application_id = int(repository.connection.execute(
+        "SELECT MAX(application_id) FROM application_learning"
+    ).fetchone()[0])
     repository.connection.execute(
-        "UPDATE application_learning SET outcome='APPLICATION_RECEIVED' "
-        "WHERE application_id = (SELECT MAX(application_id) FROM application_learning)"
+        "DELETE FROM application_learning WHERE application_id <> ?", (latest_application_id,)
+    )
+    repository.connection.execute(
+        "UPDATE application_learning SET outcome='APPLICATION_RECEIVED' WHERE application_id=?",
+        (latest_application_id,),
     )
     repository.connection.commit()
 
     assert repository.learning_adjustment("warehouse_logistics") == 0
+    assert repository.cv_learning_adjustments() == {}
+    assert repository.learning_summary() == []
     digest = repository.learning_digest()
     assert not digest["role_families"]
     assert not digest["cv_groups"]

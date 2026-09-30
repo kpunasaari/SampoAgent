@@ -1720,10 +1720,8 @@ class Repository:
             (role_family,),
         ).fetchall()
         count = len(rows)
-        if count < 5:
-            return 0
         positive = sum(row[0] in {"INTERVIEW", "ASSESSMENT", "OFFER"} for row in rows)
-        # Beta prior (2 successes / 8 failures) shrinks small histories to 20%.
+        # Beta prior (2 successes / 8 failures) shrinks sparse histories to 20%.
         posterior = (positive + 2) / (count + 10)
         return max(-8, min(8, round((posterior - 0.2) * 40)))
 
@@ -1747,15 +1745,19 @@ class Repository:
             outcomes_by_checksum.setdefault(str(row["checksum"]), []).append(str(row["outcome"]))
         adjustments: dict[str, int] = {}
         for checksum, outcomes in outcomes_by_checksum.items():
-            if len(outcomes) < 5:
-                continue
             positive = sum(outcome in {"INTERVIEW", "ASSESSMENT", "OFFER"} for outcome in outcomes)
             posterior = (positive + 2) / (len(outcomes) + 10)
             adjustments[checksum] = max(-8, min(8, round((posterior - 0.2) * 40)))
         return adjustments
 
     def learning_summary(self) -> list[dict[str, object]]:
-        return [dict(row) for row in self.connection.execute("SELECT role_family, COUNT(*) AS outcomes, SUM(CASE WHEN outcome IN ('INTERVIEW','ASSESSMENT','OFFER') THEN 1 ELSE 0 END) AS positive_outcomes FROM application_learning GROUP BY role_family ORDER BY outcomes DESC, role_family")]
+        return [dict(row) for row in self.connection.execute(
+            "SELECT role_family, COUNT(*) AS outcomes, "
+            "SUM(CASE WHEN outcome IN ('INTERVIEW','ASSESSMENT','OFFER') THEN 1 ELSE 0 END) AS positive_outcomes "
+            "FROM application_learning "
+            "WHERE outcome IN ('INTERVIEW','ASSESSMENT','OFFER','REJECTED','NO_RESPONSE') "
+            "GROUP BY role_family ORDER BY outcomes DESC, role_family"
+        )]
 
     def learning_digest(self) -> dict[str, object]:
         """Return a small-cohort-suppressed, de-identified outcome learning digest."""

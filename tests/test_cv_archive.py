@@ -305,8 +305,10 @@ def test_cv_learning_adjustments_use_only_confirmed_outcome_records(tmp_path: Pa
         application_id = repository.queue_application(job_id, language="en", cv_path=str(app_cv))
         repository.add_document(kind="application_cv", path=str(app_cv), checksum=checksum)
         repository.update_application_status(application_id, "INTERVIEW", "Candidate confirmed interview invitation")
+        if index == 0:
+            assert repository.cv_learning_adjustments()[checksum] == 3
         if index == 3:
-            assert repository.cv_learning_adjustments() == {}
+            assert repository.cv_learning_adjustments()[checksum] > 0
     repository.update_application_status(application_id, "CAPTCHA_HOLD", "Not an outcome")
 
     adjustments = repository.cv_learning_adjustments()

@@ -511,7 +511,7 @@ def test_application_claim_is_unique_even_if_reached_concurrently():
         raise AssertionError("The same job was reserved twice")
 
 
-def test_application_outcomes_update_a_role_specific_learning_prior_only_after_evidence():
+def test_one_confirmed_outcome_updates_the_role_prior_and_receipts_do_not():
     repository = Repository(":memory:")
     repository.initialize()
     repository.load_demo()
@@ -522,6 +522,8 @@ def test_application_outcomes_update_a_role_specific_learning_prior_only_after_e
         job_ids.append(int(cursor.lastrowid))
     apps = [repository.queue_application(job_id, language="en", cv_path=None) for job_id in job_ids]
     assert repository.learning_adjustment("warehouse_logistics") == 0
+    repository.update_application_status(apps[0], "INTERVIEW", "Candidate confirmed outcome")
+    assert repository.learning_adjustment("warehouse_logistics") == 3
     for application_id in apps:
         repository.update_application_status(application_id, "INTERVIEW", "Candidate confirmed outcome")
     assert repository.learning_adjustment("warehouse_logistics") > 0

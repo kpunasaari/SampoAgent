@@ -45,6 +45,24 @@ def test_dashboard_shows_safe_mode_and_actionable_metric_cards() -> None:
     assert "What to do next" in page.text
 
 
+def test_dashboard_setup_action_does_not_look_like_a_second_active_navigation_item():
+    client = TestClient(create_app(database_path=":memory:"))
+
+    page = client.get("/")
+
+    assert page.text.count('class="nav-link active"') == 1
+    assert 'class="action-link" href="/onboarding"' in page.text
+
+
+def test_form_controls_stay_within_the_available_mobile_content_width() -> None:
+    client = TestClient(create_app(database_path=":memory:"))
+
+    page = client.get("/answers")
+
+    assert 'select name=\'scope_type\'' in page.text
+    assert "input,select{max-width:100%;min-width:0}" in page.text
+
+
 def test_shell_uses_canonical_navigation_for_agent_and_cv_result() -> None:
     client = TestClient(create_app(database_path=":memory:"))
 

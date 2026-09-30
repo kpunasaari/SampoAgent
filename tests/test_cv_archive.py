@@ -556,3 +556,30 @@ def test_unconfirmed_cv_history_is_not_used_in_generated_cv(tmp_path: Path):
     assert "Work experience" not in text
     assert "Unreviewed school cleaning claim" not in text
     assert choice.score == 0
+
+
+def test_generated_cv_archive_keeps_distinct_employer_versions(tmp_path: Path):
+    """Employer-specific CVs must not overwrite one another under a shared job id."""
+    from pypdf import PdfReader
+
+    base_job = {
+        "id": 91, "title": "Cleaner", "description": "School cleaning experience preferred.", "language": "en",
+    }
+    candidate = {"name": "Aino Example", "email": "aino@example.test"}
+
+    first = choose_application_cv(
+        output_dir=tmp_path / "generated", archived=[], job={**base_job, "company": "North School"},
+        candidate=candidate, facts=[], records={},
+    )
+    first_content = first.path.read_bytes()
+    second = choose_application_cv(
+        output_dir=tmp_path / "generated", archived=[], job={**base_job, "company": "South School"},
+        candidate=candidate, facts=[], records={},
+    )
+
+    first_text = "\n".join(page.extract_text() or "" for page in PdfReader(str(first.path)).pages)
+    second_text = "\n".join(page.extract_text() or "" for page in PdfReader(str(second.path)).pages)
+    assert first.path != second.path
+    assert first.path.read_bytes() == first_content
+    assert "Prepared for: North School" in first_text
+    assert "Prepared for: South School" in second_text

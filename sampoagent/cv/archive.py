@@ -227,6 +227,7 @@ def choose_application_cv(*, output_dir: Path, archived: list[dict[str, object]]
 
     snapshot = {
         "job_id": job.get("id"), "title": job.get("title"), "description": job.get("description"),
+        "company": str(job.get("company", "")).strip(),
         "language": language, "family": family, "candidate": candidate,
         "facts": sorted((str(fact.get("type")), str(fact.get("value"))) for fact in usable_facts),
         "records": usable_records,

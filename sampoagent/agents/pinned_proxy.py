@@ -260,7 +260,15 @@ class PinnedHttpsProxy:
 
     @property
     def playwright_proxy(self) -> dict[str, str]:
-        return {"server": self.proxy_url, "username": self._username, "password": self._password}
+        return {
+            "server": self.proxy_url,
+            "username": self._username,
+            "password": self._password,
+            # Chromium otherwise has implicit localhost/link-local bypasses.
+            # Make the required proxy path explicit instead of relying on
+            # Playwright's version-specific launch defaults.
+            "bypass": "<-loopback>",
+        }
 
     def set_allowed_origin(self, url: str | None) -> None:
         origin: tuple[str, int] | None = None

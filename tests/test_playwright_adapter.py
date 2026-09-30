@@ -437,6 +437,7 @@ def test_browser_start_installs_local_pinned_proxy_before_page_use(tmp_path, mon
     assert proxy_config["server"].startswith("http://127.0.0.1:")
     assert proxy_config["username"]
     assert proxy_config["password"]
+    assert proxy_config.get("bypass") == "<-loopback>"
     proxy = agent._egress_proxy
     assert proxy is not None and proxy.started
     context.emit_close()

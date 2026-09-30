@@ -717,19 +717,22 @@ def test_synthetic_employer_e2e_posts_exact_cv_once_and_records_same_origin_rece
     from email.parser import BytesParser
     from email.policy import default
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import socket
     import ssl
     import threading
     from urllib.parse import urlsplit
+    import pytest
 
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import rsa
     from cryptography.x509.oid import NameOID
-    from playwright.sync_api import sync_playwright
+    from playwright.sync_api import Error as PlaywrightError, sync_playwright
     from reportlab.pdfgen.canvas import Canvas
     from pypdf import PdfReader
 
     from sampoagent.agents.playwright_adapter import PlaywrightBrowserAgent
+    from sampoagent.agents.pinned_proxy import PinnedHttpsProxy
     from sampoagent.applications.packages import enqueue_eligible_applications
 
     repository = Repository(":memory:")
@@ -756,6 +759,7 @@ def test_synthetic_employer_e2e_posts_exact_cv_once_and_records_same_origin_rece
       <label for="email">Email address</label><input id="email" name="email" type="email" required>
       <label for="resume">Upload your CV</label><input id="resume" name="resume" type="file" accept="application/pdf,.pdf" required>
       <button type="submit">Apply</button></form>"""
+    captured_gets = []
     captured_posts = []
     response_body = b"<!doctype html><h1>Application received</h1>"
 
@@ -767,6 +771,7 @@ def test_synthetic_employer_e2e_posts_exact_cv_once_and_records_same_origin_rece
             if self.path != "/apply/warehouse":
                 self.send_error(404)
                 return
+            captured_gets.append(self.path)
             payload = html.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -813,6 +818,20 @@ def test_synthetic_employer_e2e_posts_exact_cv_once_and_records_same_origin_rece
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
     application_url = f"https://{host}:{server.server_port}/apply/warehouse"
+    proxy_connections = []
+    pinned_ip = "93.184.216.34"
+
+    def fixture_resolver(requested_host, port, *, type):
+        assert requested_host == host
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (pinned_ip, port))]
+
+    def fixture_connector(address, *, timeout):
+        proxy_connections.append(address)
+        assert address == (pinned_ip, server.server_port)
+        return socket.create_connection(("127.0.0.1", server.server_port), timeout=timeout)
+
+    proxy = PinnedHttpsProxy(application_url, resolver=fixture_resolver, connector=fixture_connector)
+    proxy.start()
     repository.connection.execute("UPDATE jobs SET application_url=? WHERE id=1", (application_url,))
     repository.connection.commit()
     repository.mark_job_user_reviewed(1, reviewed_current=True)
@@ -836,10 +855,9 @@ def test_synthetic_employer_e2e_posts_exact_cv_once_and_records_same_origin_rece
             chromium = playwright.chromium.launch(
                 headless=True,
                 args=[
-                    f"--host-resolver-rules=MAP {host} 127.0.0.1",
-                    "--proxy-server=direct://",
-                    "--proxy-bypass-list=*",
+                    f"--host-resolver-rules=MAP {host} ~NOTFOUND",
                 ],
+                proxy=proxy.playwright_proxy,
             )
             context = chromium.new_context(ignore_https_errors=True)
             page = context.new_page()
@@ -855,14 +873,22 @@ def test_synthetic_employer_e2e_posts_exact_cv_once_and_records_same_origin_rece
 
             context.route("**/*", contain_fixture_egress)
             browser = PlaywrightBrowserAgent(tmp_path / "browser-profile")
+            browser._egress_proxy = proxy
             browser._context = context
             browser._page = page
             try:
                 result = process_application(repository, application_id, browser)
+                # With the proxy gone, the unavailable browser-side hostname
+                # resolution prevents a direct connection from escaping.
+                proxy.close()
+                with pytest.raises(PlaywrightError):
+                    page.goto(application_url, timeout=3000)
+                assert captured_gets == ["/apply/warehouse"]
             finally:
                 browser.close()
                 chromium.close()
     finally:
+        proxy.close()
         server.shutdown()
         server.server_close()
         server_thread.join(timeout=2)
@@ -877,6 +903,8 @@ def test_synthetic_employer_e2e_posts_exact_cv_once_and_records_same_origin_rece
     assert len(attempts) == 1
     assert attempts[0]["state"] == "SUBMITTED"
     assert len(captured_posts) == 1
+    assert captured_gets == ["/apply/warehouse"]
+    assert proxy_connections
 
     post_path, headers, body = captured_posts[0]
     assert post_path == "/apply/warehouse"
@@ -899,4 +927,5 @@ def test_synthetic_employer_e2e_posts_exact_cv_once_and_records_same_origin_rece
     assert sha256(uploaded_parts[0][1]).hexdigest() == sha256(cv_bytes).hexdigest()
     evidence = repository.submission_evidence_for_application(application_id)
     assert evidence[0]["final_url"] == application_url
+
     repository.connection.close()

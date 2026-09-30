@@ -726,14 +726,30 @@ def test_synthetic_employer_e2e_posts_exact_cv_once_and_records_same_origin_rece
     from cryptography.hazmat.primitives.asymmetric import rsa
     from cryptography.x509.oid import NameOID
     from playwright.sync_api import sync_playwright
+    from reportlab.pdfgen.canvas import Canvas
+    from pypdf import PdfReader
 
     from sampoagent.agents.playwright_adapter import PlaywrightBrowserAgent
+    from sampoagent.applications.packages import enqueue_eligible_applications
 
-    repository, application_id = _authorized_repository(tmp_path)
-    cv_path = tmp_path / "approved-resume.pdf"
-    cv_bytes = b"%PDF-1.4\nsynthetic reviewed candidate CV\n%%EOF"
-    cv_path.write_bytes(cv_bytes)
-    repository.update_application_cv_path(application_id, str(cv_path))
+    repository = Repository(":memory:")
+    repository.initialize()
+    repository.load_demo()
+    repository.add_target_occupation("Warehouse Worker", "Varastotyöntekijä")
+    repository.set_setting("application_mode", "autopilot")
+    repository.set_setting("daily_limit", "5")
+    repository.set_setting("dry_run", "false")
+    repository.set_setting("automation_paused", "false")
+    repository.grant_autopilot()
+    weak_template = tmp_path / "old-general-cv.pdf"
+    canvas = Canvas(str(weak_template))
+    canvas.drawString(50, 780, "Old general CV")
+    canvas.save()
+    repository.archive_cv(
+        path=str(weak_template), checksum=sha256(weak_template.read_bytes()).hexdigest(),
+        language="en", role_family="universal", source_job_id=None,
+        fit_score=30, ats_score=100, strategy="uploaded",
+    )
     host = "careers.northstar-logistics.fi"
     html = """<!doctype html><meta charset="utf-8"><form method="post" enctype="multipart/form-data" action="/apply/warehouse">
       <label for="full-name">Full name</label><input id="full-name" name="full_name" required>
@@ -800,6 +816,20 @@ def test_synthetic_employer_e2e_posts_exact_cv_once_and_records_same_origin_rece
     repository.connection.execute("UPDATE jobs SET application_url=? WHERE id=1", (application_url,))
     repository.connection.commit()
     repository.mark_job_user_reviewed(1, reviewed_current=True)
+    assert enqueue_eligible_applications(repository, tmp_path / "application-data") == 1
+    application_row = repository.connection.execute("SELECT * FROM applications").fetchone()
+    assert application_row is not None
+    application_id = int(application_row["id"])
+    application = repository.application(application_id)
+    archived_cv = next(item for item in repository.cv_archives() if item["source_job_id"] == 1)
+    cv_path = Path(str(application["cv_path"]))
+    cv_bytes = cv_path.read_bytes()
+    generated_text = "\n".join(page.extract_text() or "" for page in PdfReader(str(cv_path)).pages)
+    assert archived_cv["strategy"] == "generated"
+    assert sha256(cv_bytes).hexdigest() == archived_cv["checksum"]
+    assert "Target role: Warehouse Worker" in generated_text
+    assert "forklift operation" in generated_text
+    assert "Old general CV" not in generated_text
 
     try:
         with sync_playwright() as playwright:

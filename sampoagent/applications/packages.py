@@ -74,8 +74,14 @@ def enqueue_eligible_applications(repository: object, storage_dir: Path) -> int:
         for record_type in ("experience", "education", "certificate", "licence", "language", "availability")
     }
     configs = load_configs(repository.setting("scoring_config"))
-    for job in repository.rows("jobs"):
-        if repository.has_application_for_job(int(job["id"])) or not _active_verified_job(job):
+    for listed_job in repository.rows("jobs"):
+        job_id = int(listed_job["id"])
+        if repository.has_application_for_job(job_id):
+            continue
+        # The general rows() view omits the verification snapshot join used
+        # by _active_verified_job; always evaluate the authoritative job view.
+        job = repository.job(job_id)
+        if not job or not _active_verified_job(job):
             continue
         if not matches_preferences(job=job, preferences=repository.preferences()):
             continue

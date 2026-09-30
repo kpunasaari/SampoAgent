@@ -73,6 +73,43 @@ def test_queue_preparation_creates_and_archives_an_automatic_job_cv(tmp_path):
     assert "Tailored CV" in application["notes"]
 
 
+def test_autopilot_enqueue_uses_verified_snapshot_and_archives_its_tailored_cv(tmp_path: Path):
+    from sampoagent.applications.packages import enqueue_eligible_applications
+    from sampoagent.db.repository import Repository
+
+    repository = Repository(":memory:")
+    repository.initialize()
+    repository.load_demo()
+    repository.add_target_occupation("Warehouse Worker", "Varastotyöntekijä")
+    repository.connection.execute(
+        "UPDATE jobs SET application_url=? WHERE id=1",
+        ("https://careers.northstar-logistics.fi/apply/warehouse",),
+    )
+    repository.connection.commit()
+    repository.mark_job_user_reviewed(1, reviewed_current=True)
+    repository.set_setting("application_mode", "autopilot")
+    repository.set_setting("daily_limit", "5")
+    repository.set_setting("dry_run", "false")
+    repository.set_setting("automation_paused", "false")
+    repository.grant_autopilot()
+
+    queued = enqueue_eligible_applications(repository, tmp_path / "application-data")
+
+    applications = repository.connection.execute("SELECT * FROM applications").fetchall()
+    assert queued == 1
+    assert len(applications) == 1
+    application = dict(applications[0])
+    archive = repository.cv_archives()
+    assert application["job_id"] == 1
+    assert application["cv_path"]
+    assert Path(application["cv_path"]).is_file()
+    assert archive[0]["strategy"] == "generated"
+    assert archive[0]["source_job_id"] == 1
+    assert sha256(Path(application["cv_path"]).read_bytes()).hexdigest() == archive[0]["checksum"]
+    assert "Tailored CV generated" in application["notes"]
+    repository.connection.close()
+
+
 def test_manual_generated_cvs_have_distinct_archived_paths(tmp_path):
     from fastapi.testclient import TestClient
     from sampoagent.app.main import create_app

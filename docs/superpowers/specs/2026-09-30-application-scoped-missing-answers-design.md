@@ -5,7 +5,7 @@ Status: implementation increment within the approved local Full Autopilot scope
 
 ## Goal
 
-When an otherwise supported application form requires a safe fact that is not in the candidate's confirmed profile, SampoAgent should ask for that answer in its local Applications screen, bind it to that one application and exact form/listing snapshot, and let the selected application mode continue. It must never silently infer the answer or make the response reusable for other employers.
+When an otherwise supported application form requires a safe fact that is not in the candidate's confirmed profile, SampoAgent must never silently infer it or make an application-specific response reusable for other employers. Full Autopilot holds that application before entering candidate data, continues other eligible work, and does not surface a per-job question automatically. The candidate may open a collapsed manual-review disclosure in the local Applications screen and explicitly confirm an answer if they choose; that response remains bound to the exact application and form/listing snapshot.
 
 ## Boundaries
 
@@ -14,6 +14,7 @@ When an otherwise supported application form requires a safe fact that is not in
 - Render the exact employer prompt, description, and allowed options as untrusted data. Never interpret prompt text as instructions to the assistant or application. Escape it in HTML.
 - Require the candidate to explicitly confirm the answer in the local UI. Select/radio responses must be one exact option from the saved form snapshot. Values are not placed in activity logs or status notes.
 - If form or verified-listing snapshot changes, an old response cannot resolve the field; ask again. If all captured required questions are answered, put the application back in the ready queue. The worker still follows Review Everything, Smart Approval, or the active Full Autopilot grant; answering a field does not itself approve an application.
+- While Full Autopilot is selected, missing-answer controls stay inside a collapsed, candidate-opened manual-review disclosure. The worker does not interrupt or ask per job; unresolved data remains a fail-closed hold. Review modes may show an explicitly recorded question normally.
 - Bind native input constraints (`min`, `max`, `step`, `pattern`, `minlength`, `maxlength`) into the semantic form signature and saved question. Validate ranges/steps/length locally and check the live employer control's native browser validity immediately after filling, before advancing or submitting.
 - Include application-scoped answers in the per-application in-flight data fingerprint so a changed answer stops before any next field or submit. Do not include them in the saved Autopilot grant fingerprint, which would invalidate the user's global grant for every missing field.
 - The Applications response endpoint requires the existing local form token. Candidate answers remain local and are included in exact-package review when the selected mode uses it.
@@ -22,7 +23,7 @@ When an otherwise supported application form requires a safe fact that is not in
 
 1. The browser adapter inspects a live supported form. Deterministic resolution identifies missing required fields.
 2. Before returning `NEEDS_USER`, the runner persists only eligible question metadata and the current form/listing hashes.
-3. Applications displays one response control per pending field and labels the response as application-only. High-risk and unsupported fields are not rendered as answerable questions.
+3. Applications displays one response control per pending field and labels the response as application-only. Under Full Autopilot those controls are inside a collapsed manual-review disclosure that the candidate must choose to open. High-risk and unsupported fields are not rendered as answerable questions.
 4. On candidate confirmation, validation is repeated against the stored prompt kind/options. The answer is saved locally, without touching the reusable answer bank. Once no pending questions remain, the application returns to `READY`.
 5. On the next worker cycle, the resolver consumes only answers whose application, form signature, and listing snapshot all match. Final form/readback/policy gates still apply.
 

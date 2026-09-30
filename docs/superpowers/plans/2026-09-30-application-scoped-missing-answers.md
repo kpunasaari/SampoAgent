@@ -80,3 +80,8 @@
 - `py -m sampoagent --help`: passed.
 - `git diff --check`: passed.
 - Synthetic SQLite upgrade and fake-browser single/multi-step application resumes were exercised. No live candidate data or employer was used.
+
+### Full Autopilot prompt policy clarification — 2026-09-30
+
+- The current user goal requires Full Autopilot not to ask per-job questions. Missing required answers now remain fail-closed holds while other eligible applications continue; the application-only answer controls are hidden inside a collapsed manual-review disclosure and appear only when the candidate opens it. Review modes retain the explicit answer UI. No unknown value is inferred or submitted.
+- UI regression test was observed failing before the change and passing after. Focused `tests/test_application_review_ui.py`: 6 passed. Full-suite result and remaining external release gates are recorded in the full-automation implementation plan.

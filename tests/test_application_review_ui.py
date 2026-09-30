@@ -149,6 +149,38 @@ def test_application_question_ui_escapes_prompt_and_requires_csrf_and_explicit_c
     assert repository.application_form_answers(application_id, form_signature="a" * 64, listing_hash="b" * 64) == {"shift": "Night"}
 
 
+def test_full_autopilot_keeps_required_answer_review_collapsed_until_requested(tmp_path):
+    client = TestClient(create_app(database_path=tmp_path / "autopilot-held-answer.db"), follow_redirects=False)
+    repository = client.app.state.repository
+    repository.load_demo()
+    application_id = repository.queue_application(1, language="en", cv_path=None)
+    repository.update_application_status(
+        application_id, "NEEDS_USER", "Required candidate answer needs review", queue_state="WAITING_USER",
+    )
+    repository.set_setting("application_mode", "autopilot")
+    repository.register_application_questions(
+        application_id,
+        form_signature="a" * 64,
+        listing_hash="b" * 64,
+        questions=[{
+            "field_id": "start_date", "label": "When can you start?", "kind": "date",
+            "required": True, "risk": "LOW",
+        }],
+    )
+
+    page = client.get("/applications")
+
+    assert page.status_code == 200
+    details = re.search(
+        r"<details><summary>Open manual review if you want to answer this application's required field</summary>(.*?)</details>",
+        page.text,
+        re.DOTALL,
+    )
+    assert details
+    assert "When can you start?" in details.group(1)
+    assert "Full Autopilot does not ask per-job questions" in page.text
+
+
 def test_application_question_ui_preserves_employer_validation_attributes(tmp_path):
     client = TestClient(create_app(database_path=tmp_path / "application-question-constraints.db"))
     repository = client.app.state.repository

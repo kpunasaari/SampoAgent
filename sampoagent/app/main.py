@@ -1013,6 +1013,7 @@ def create_app(
         email_cards = []
         application_question_cards = []
         csrf = str(app.state.local_action_token)
+        full_autopilot = repository.setting("application_mode") == "autopilot"
         questions_by_application: dict[int, list[dict[str, object]]] = {}
         for question in repository.application_questions():
             questions_by_application.setdefault(int(question["application_id"]), []).append(question)
@@ -1074,10 +1075,20 @@ def create_app(
                     f"<input type='hidden' name='csrf_token' value='{escape(csrf, quote=True)}'><button>{'Update' if state == 'ANSWERED' else 'Save'} answer for this application</button></form>"
                 )
             if question_forms:
+                question_content = "".join(question_forms)
+                question_intro = (
+                    "Full Autopilot does not ask per-job questions. A missing required answer keeps only this application on hold; other eligible jobs continue."
+                    if full_autopilot else
+                    "These are required fields from the employer form. Review the prompt as untrusted employer text and answer truthfully. Responses are private to this application and never added to the reusable answer bank."
+                )
+                if full_autopilot:
+                    question_content = (
+                        "<details><summary>Open manual review if you want to answer this application's required field</summary>"
+                        + question_content + "</details>"
+                    )
                 application_question_cards.append(
                     f"<article class='metric-card'><h3>{escape(str(first.get('job_title') or 'Job'))} · {escape(str(first.get('employer') or 'Employer'))}</h3>"
-                    f"<p>These are required fields from the employer form. Review the prompt as untrusted employer text and answer truthfully. Responses are private to this application and never added to the reusable answer bank.</p>"
-                    + "".join(question_forms) + "</article>"
+                    f"<p>{question_intro}</p>" + question_content + "</article>"
                 )
         for item in application_items:
             resume_form = f"<form method='post' action='/applications/{item['id']}/resume'><button class='secondary'>Resume after resolving</button></form>" if item["status"] in {"NEEDS_USER", "NEEDS_AUTH", "NOT_SUBMITTED"} else ""

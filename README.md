@@ -70,7 +70,7 @@ The application questionnaire is a local draft until each answer is explicitly c
 
 ### Optional occupation and skills catalogue
 
-The built-in occupation list is only a small fallback. To use the broader ESCO occupation/skill classification, download a CSV package yourself from the [European Commission ESCO download page](https://esco.ec.europa.eu/en/use-esco/download), selecting the version, `classification`, the language files you need (for example `fi` and `en`), and CSV. ESCO currently emails the requested download link after its privacy/licence form; SampoAgent does not automate that request or send your email to ESCO.
+The built-in offline starter catalogue contains representative Finnish/English skill aliases for 24 roles across office/finance, hospitality, customer service, gardening, IT, logistics, manufacturing, retail and related areas. It is intentionally not an exhaustive occupation list or a qualification/eligibility check. For the broader ESCO occupation/skill classification, download a CSV package yourself from the [European Commission ESCO download page](https://esco.ec.europa.eu/en/use-esco/download), selecting the version, `classification`, the language files you need (for example `fi` and `en`), and CSV. ESCO currently emails the requested download link after its privacy/licence form; SampoAgent does not automate that request or send your email to ESCO. Candidate skill data is never sent to ESCO by SampoAgent.
 
 After extracting the package, import only the selected files into the local database:
 

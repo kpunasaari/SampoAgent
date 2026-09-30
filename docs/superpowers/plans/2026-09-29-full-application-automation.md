@@ -238,6 +238,7 @@ These notes are chronological; later dated progress updates supersede earlier st
 ### Progress update — ESCO catalog and explicit search activation (2026-09-29)
 
 - The older execution note above predates this increment: an optional, user-downloaded ESCO CSV importer and local occupation-skill index are now implemented and covered with synthetic package tests. Current catalog, attribution and license/reuse handling is described in the design spec and README.
+- The offline starter occupation matcher includes Finnish/English aliases for 24 representative roles; it remains explicitly non-exhaustive. Full occupation breadth continues to use the optional user-downloaded local ESCO index; candidate skill data is not sent to ESCO's web API.
 - Career recommendations consume confirmed professional and transferable skills, but recommendations and historical job titles no longer become searches by themselves. Only user-enabled target occupations, explicit career profiles, or explicit search preferences create search terms.
 - Still open in Task 3: structured CV analysis, OCR, field conflict review and country guidance; these are now implemented as described in the dated progress notes below. Live verification against a complete Commission package remains open.
 

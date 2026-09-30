@@ -21,19 +21,101 @@ class OccupationRecommendation:
     qualification_advisories: tuple[QualificationAdvisory, ...] = ()
 
 
-_OCCUPATIONS = {
-    "Warehouse Worker": ("Varastotyöntekijä", {"forklift operation", "warehouse", "picking", "logistics"}),
-    "Terminal Worker": ("Terminaalityöntekijä", {"forklift operation", "logistics", "loading"}),
-    "Logistics Worker": ("Logistiikkatyöntekijä", {"forklift operation", "logistics", "delivery"}),
-    "Cleaner": ("Siivooja", {"cleaning", "hygiene", "facilities"}),
-    "Customer Service Representative": ("Asiakaspalvelija", {"customer service", "sales", "english"}),
-}
-
-
 def _normalize(value: str) -> str:
     decomposed = unicodedata.normalize("NFKD", value.casefold())
     plain = "".join(char for char in decomposed if not unicodedata.combining(char))
     return " ".join(re.findall(r"[^\W_]+", plain))
+
+
+# This intentionally small, hand-authored offline starter set makes career
+# suggestions useful before a user imports a full local ESCO classification.
+# Skill aliases describe relevance only; they are not qualification rules.
+_BUILTIN_OCCUPATIONS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "Accountant": ("Kirjanpitäjä", ("accounting", "bookkeeping", "kirjanpito", "taloushallinto")),
+    "Administrative Assistant": (
+        "Toimistoassistentti",
+        ("administration", "office administration", "document management", "toimistotyö", "asiakirjahallinta"),
+    ),
+    "Baker": ("Leipuri", ("baking", "bakery", "leivonta", "leipomotyö")),
+    "Barista": ("Barista", ("barista", "coffee preparation", "kahvilatyö", "kahvin valmistus")),
+    "Cleaner": (
+        "Siivooja",
+        ("cleaning", "hygiene", "facilities", "siivous", "puhtaanapito", "toimitilahuolto", "lattianhoito"),
+    ),
+    "Cook": ("Kokki", ("cooking", "food preparation", "ruoanlaitto", "ruoanvalmistus", "ravintolakeittiö")),
+    "Customer Service Representative": (
+        "Asiakaspalvelija",
+        ("customer service", "sales", "asiakaspalvelu", "myynti"),
+    ),
+    "Data Analyst": (
+        "Data-analyytikko",
+        ("data analysis", "spreadsheets", "reporting", "data analyysi", "tiedon analysointi", "raportointi"),
+    ),
+    "Gardener": (
+        "Puutarhatyöntekijä",
+        ("gardening", "garden maintenance", "horticulture", "puutarhanhoito", "viheralueiden hoito"),
+    ),
+    "Graphic Designer": (
+        "Graafinen suunnittelija",
+        ("graphic design", "visual design", "illustration", "graafinen suunnittelu", "kuvitus"),
+    ),
+    "Hotel Receptionist": (
+        "Hotellivirkailija",
+        ("reception", "hotel service", "hospitality", "vastaanottotyö", "hotellipalvelu", "majoituspalvelu"),
+    ),
+    "IT Support Technician": (
+        "IT-tukihenkilö",
+        ("troubleshooting", "helpdesk", "technical support", "computer support", "tekninen tuki", "lähituki"),
+    ),
+    "Kitchen Assistant": (
+        "Keittiöapulainen",
+        ("dishwashing", "kitchen work", "food service", "astiahuolto", "keittiötyö", "ruokahuolto"),
+    ),
+    "Logistics Coordinator": (
+        "Logistiikkakoordinaattori",
+        ("logistics planning", "supply chain", "logistics coordination", "kuljetussuunnittelu", "toimitusketju"),
+    ),
+    "Logistics Worker": (
+        "Logistiikkatyöntekijä",
+        ("forklift operation", "logistics", "delivery", "loading", "trukin käyttö", "logistiikka", "jakelu", "lastaus"),
+    ),
+    "Machine Operator": (
+        "Koneenkäyttäjä",
+        ("machine operation", "manufacturing", "machine tooling", "koneenkäyttö", "koneistus", "tuotanto"),
+    ),
+    "Maintenance Worker": (
+        "Huoltotyöntekijä",
+        ("maintenance", "repair", "property maintenance", "huoltotyö", "korjaustyö", "kiinteistönhuolto"),
+    ),
+    "Marketing Assistant": (
+        "Markkinointiassistentti",
+        ("marketing", "social media", "content creation", "markkinointi", "sosiaalinen media", "sisällöntuotanto"),
+    ),
+    "Production Worker": (
+        "Tuotantotyöntekijä",
+        ("production", "assembly", "manufacturing", "quality inspection", "tuotantotyö", "kokoonpano", "laaduntarkastus"),
+    ),
+    "Retail Sales Assistant": (
+        "Myymälätyöntekijä",
+        ("retail", "cashier", "shop work", "myyntityö", "kassatyö", "kaupan työ"),
+    ),
+    "Software Developer": (
+        "Ohjelmistokehittäjä",
+        ("software development", "programming", "coding", "ohjelmistokehitys", "ohjelmointi", "koodaus"),
+    ),
+    "Textile Worker": (
+        "Tekstiilityöntekijä",
+        ("sewing", "garment production", "textile work", "ompelu", "vaatteiden ompelu", "tekstiilityö"),
+    ),
+    "Warehouse Worker": (
+        "Varastotyöntekijä",
+        ("forklift operation", "warehouse", "picking", "logistics", "trukin käyttö", "varastotyö", "tilausten keräily"),
+    ),
+    "Terminal Worker": (
+        "Terminaalityöntekijä",
+        ("forklift operation", "logistics", "loading", "cargo handling", "trukin käyttö", "terminaalityö", "lastaus"),
+    ),
+}
 
 
 def _matches(candidate_skill: str, taxonomy_labels: dict[str, str]) -> bool:
@@ -106,17 +188,25 @@ def recommend_occupations(
 ) -> list[OccupationRecommendation]:
     if taxonomy is not None:
         return _recommend_from_taxonomy(skills, ignored, taxonomy, country_code)
-    normalized = {skill.casefold() for skill in skills}
-    ignored_set = {title.casefold() for title in ignored}
+    ignored_set = {_normalize(title) for title in ignored}
+    normalized_skills: dict[str, str] = {}
+    for skill in skills:
+        normalized = _normalize(skill)
+        if normalized:
+            normalized_skills.setdefault(normalized, skill)
     matches: list[OccupationRecommendation] = []
-    for title, (title_fi, related) in _OCCUPATIONS.items():
-        if title.casefold() in ignored_set:
+    for title, (title_fi, related) in _BUILTIN_OCCUPATIONS.items():
+        if _normalize(title) in ignored_set or _normalize(title_fi) in ignored_set:
             continue
-        supporting = sorted(normalized & related)
+        related_labels = {str(index): alias for index, alias in enumerate(related)}
+        supporting = sorted(
+            {skill for skill in normalized_skills.values() if _matches(skill, related_labels)},
+            key=str.casefold,
+        )
         if supporting:
             matches.append(OccupationRecommendation(
                 title, title_fi, min(95, 55 + 20 * len(supporting)), supporting, [],
                 qualification_advisories=(advisories_for_occupation(title, title_fi, country_code=country_code)
                     if country_code else ()),
             ))
-    return sorted(matches, key=lambda item: item.score, reverse=True)
+    return sorted(matches, key=lambda item: (-item.score, item.title_en.casefold()))

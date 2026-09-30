@@ -1,5 +1,9 @@
 # SampoAgent engineering rules
 
+## Offline occupation suggestions — 2026-09-30
+
+The built-in fallback matcher provides FI/EN skill aliases for 24 representative roles across multiple sectors. It is only a starter catalogue; never describe it as all occupations or as a qualification/eligibility check. Users may import their own downloaded ESCO CSV files into the local index for broader occupation coverage. Do not send candidate skills to the public ESCO API. Recommendations never activate a search target automatically.
+
 ## Questionnaire update — 2026-09-29
 
 `candidate/questions.py` defines 63 optional reusable prompts and nine per-application

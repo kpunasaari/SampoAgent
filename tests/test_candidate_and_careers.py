@@ -137,8 +137,38 @@ def test_confirmed_skill_recommends_related_roles_without_auto_targeting() -> No
 
     roles = {recommendation.title_en: recommendation for recommendation in recommendations}
     assert "Warehouse Worker" in roles
+    assert "Logistics Worker" in roles
+    assert "Terminal Worker" in roles
     assert roles["Warehouse Worker"].auto_target is False
     assert "forklift operation" in roles["Warehouse Worker"].supporting_facts
+
+
+def test_builtin_recommendations_cover_multiple_sectors_and_finnish_skill_labels() -> None:
+    from sampoagent.careers.recommendations import recommend_occupations
+
+    cases = (
+        ("kirjanpito", "Accountant"),
+        ("ohjelmistokehitys", "Software Developer"),
+        ("leivonta", "Baker"),
+    )
+
+    for skill, expected_title in cases:
+        recommendations = recommend_occupations([skill], ignored=[])
+        roles = {recommendation.title_en: recommendation for recommendation in recommendations}
+
+        assert expected_title in roles
+        assert roles[expected_title].supporting_facts == [skill]
+        assert roles[expected_title].auto_target is False
+
+
+def test_builtin_recommendations_do_not_count_case_variants_as_separate_skills() -> None:
+    from sampoagent.careers.recommendations import recommend_occupations
+
+    recommendations = recommend_occupations(["kirjanpito", "KIRJANPITO"], ignored=[])
+    accountant = next(item for item in recommendations if item.title_en == "Accountant")
+
+    assert accountant.supporting_facts == ["kirjanpito"]
+    assert accountant.score == 75
 
 
 def test_cv_file_text_reader_supports_txt_and_rejects_unknown_extensions(tmp_path: Path) -> None:

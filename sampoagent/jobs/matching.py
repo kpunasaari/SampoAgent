@@ -2,6 +2,8 @@
 
 from collections.abc import Mapping
 
+from sampoagent.jobs.salary import parse_monthly_eur_salary
+
 
 def hard_requirement_failures(*, required: list[str], confirmed_facts: list[str]) -> list[str]:
     confirmed = {value.casefold() for value in confirmed_facts}
@@ -54,6 +56,14 @@ def matches_preferences(*, job: Mapping[str, object], preferences: Mapping[str, 
         source_known=source_known,
     ):
         return False
+    try:
+        minimum_salary = max(0, int(preferences.get("salary_minimum", 0) or 0))
+    except (TypeError, ValueError, OverflowError):
+        minimum_salary = 0
+    if minimum_salary:
+        salary = parse_monthly_eur_salary(str(job.get("description", "")))
+        if salary and salary.maximum_eur is not None and salary.maximum_eur < minimum_salary:
+            return False
     location = str(job.get("location", "")).casefold()
     locations = [item.strip().casefold() for item in str(preferences.get("locations", "")).split(",") if item.strip()]
     if locations and not any(item in location for item in locations):

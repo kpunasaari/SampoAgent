@@ -171,6 +171,27 @@ def test_autopilot_holds_job_from_an_opted_out_source_category_before_opening_br
     repository.connection.close()
 
 
+def test_autopilot_holds_comparable_salary_below_preference_before_opening_browser(tmp_path):
+    repository, application_id = _authorized_repository(tmp_path)
+    repository.connection.execute(
+        "UPDATE jobs SET description='Salary EUR 2,100–2,300 per month.' WHERE id=1"
+    )
+    repository.connection.commit()
+    repository.mark_job_user_reviewed(1, reviewed_current=True)
+    repository.save_preferences({"salary_minimum": 2500})
+    repository.revoke_autopilot("Minimum salary preference changed")
+    repository.grant_autopilot()
+    browser = FakeBrowser(_basic_fields())
+
+    result = process_application(repository, application_id, browser)
+
+    assert result == "BLOCKED"
+    assert browser.opened == []
+    assert browser.filled == {}
+    assert browser.submitted == 0
+    repository.connection.close()
+
+
 def test_autopilot_grant_is_invalidated_by_career_profile_or_source_policy_changes(tmp_path):
     repository, _application_id = _authorized_repository(tmp_path)
     assert repository.autopilot_authorized()

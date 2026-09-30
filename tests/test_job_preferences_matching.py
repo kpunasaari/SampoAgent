@@ -32,3 +32,43 @@ def test_opted_out_source_categories_are_excluded_from_existing_job_matches():
         job={"title": "Cleaner", "company": "Unknown source", "source_id": 91, "source_type": ""},
         preferences=preferences,
     )
+
+
+def test_monthly_salary_floor_excludes_only_comparable_offers_below_the_floor():
+    preferences = {"salary_minimum": 2500}
+
+    assert not matches_preferences(
+        job={"title": "Cleaner", "description": "Pay: €2,200–€2,400 per month."},
+        preferences=preferences,
+    )
+    assert not matches_preferences(
+        job={"title": "Cleaner", "description": "Lön EUR 2 300 per månad."},
+        preferences=preferences,
+    )
+    assert matches_preferences(
+        job={"title": "Cleaner", "description": "Salary 2 400–2 700 €/kk."},
+        preferences=preferences,
+    )
+    assert matches_preferences(
+        job={"title": "Cleaner", "description": "Hourly pay: €14.50 per hour."},
+        preferences=preferences,
+    )
+    assert matches_preferences(
+        job={"title": "Cleaner", "description": "Competitive salary; details discussed later."},
+        preferences=preferences,
+    )
+    assert matches_preferences(
+        job={"title": "Cleaner", "description": "Annual pay: EUR 28,000 per year."},
+        preferences=preferences,
+    )
+
+
+def test_monthly_salary_qualifiers_are_not_misread_as_exact_pay():
+    assert matches_preferences(
+        job={"title": "Cleaner", "description": "Salary from EUR 2,400 per month."},
+        preferences={"salary_minimum": 2500},
+    )
+    assert not matches_preferences(
+        job={"title": "Cleaner", "description": "Salary up to EUR 2,400 per month."},
+        preferences={"salary_minimum": 2500},
+    )

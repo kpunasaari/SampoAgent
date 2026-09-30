@@ -21,6 +21,7 @@ def prepare_job_cv(repository: object, job: dict[str, object], storage_dir: Path
     profile = repository.profile()
     if not profile:
         raise ValueError("Create a candidate profile before preparing an application")
+    preferred_path: Path | None = None
     if requested_path:
         item = next((entry for entry in archived if str(entry["path"]) == requested_path), None)
         path = Path(requested_path)
@@ -29,19 +30,14 @@ def prepare_job_cv(repository: object, job: dict[str, object], storage_dir: Path
         checksum = sha256(path.read_bytes()).hexdigest()
         if not item.get("checksum") or checksum != str(item["checksum"]):
             raise ValueError("The selected archived CV checksum changed; re-upload and review the file")
-        choice = CVChoice(
-            path, "reused", str(item["role_family"]), str(item["language"]),
-            int(item["fit_score"]), int(item.get("text_check_score", item.get("ats_score", 0))),
-            bool(item.get("text_check_performed")), ("Candidate-selected archived CV",), checksum,
-        )
-        text_check = f"{choice.text_check_score}%" if choice.text_check_performed else "Not checked"
-        return PreparedCV(choice, f"Candidate-selected archived CV; CV text check {text_check}.")
+        preferred_path = path
     record_types = ("experience", "education", "certificate", "licence")
     records = {kind: repository.candidate_records(kind) for kind in record_types}
     choice = choose_application_cv(
         output_dir=storage_dir / "archive", archived=archived, job=job, candidate=profile,
         facts=repository.rows("facts"), records=records,
         learning_adjustments=repository.cv_learning_adjustments(),
+        preferred_path=preferred_path,
     )
     text_check = f"{choice.text_check_score}%" if choice.text_check_performed else "Not checked"
     note = f"Tailored CV {choice.strategy}; job evidence fit {choice.score}%; CV text check {text_check}; {', '.join(choice.reasons)}"

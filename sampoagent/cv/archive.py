@@ -135,7 +135,7 @@ def assess_cv_fit(
     return score, tuple(reasons)
 
 
-def choose_application_cv(*, output_dir: Path, archived: list[dict[str, object]], job: dict[str, object], candidate: dict[str, str], facts: list[dict[str, object]], records: dict[str, list[dict[str, str]]], learning_adjustments: dict[str, int] | None = None) -> CVChoice:
+def choose_application_cv(*, output_dir: Path, archived: list[dict[str, object]], job: dict[str, object], candidate: dict[str, str], facts: list[dict[str, object]], records: dict[str, list[dict[str, str]]], learning_adjustments: dict[str, int] | None = None, preferred_path: str | Path | None = None) -> CVChoice:
     """Re-use only a same-language, same-role archived CV meeting 85% evidence fit."""
     language = str(job.get("language", "en"))
     if language not in {"fi", "en"}:
@@ -144,18 +144,36 @@ def choose_application_cv(*, output_dir: Path, archived: list[dict[str, object]]
     usable_facts = [fact for fact in facts if bool(fact.get("confirmed")) and not bool(fact.get("rejected"))]
     usable_records = _confirmed_records(records)
     learning = learning_adjustments or {}
+    preferred_resolved = Path(preferred_path).resolve() if preferred_path else None
     reusable: list[tuple[int, int, int, CVChoice]] = []
     corrupt_archive_found = False
     identity_mismatch_found = False
+    preferred_choice: CVChoice | None = None
+    preferred_rejection_reason = ""
+
+    def is_preferred(path: Path) -> bool:
+        return preferred_resolved is not None and path.resolve() == preferred_resolved
+
+    def with_reason(choice: CVChoice, reason: str) -> CVChoice:
+        return CVChoice(
+            choice.path, choice.strategy, choice.role_family, choice.language, choice.score,
+            choice.text_check_score, choice.text_check_performed, (*choice.reasons, reason), choice.checksum,
+        )
+
     for index, item in enumerate(archived):
         path = Path(str(item.get("path", "")))
+        selected = is_preferred(path)
         if not path.is_file() or not item.get("checksum"):
             corrupt_archive_found = True
+            if selected:
+                preferred_rejection_reason = "Candidate-selected archived CV was unavailable or had no reviewed checksum"
             continue
         try:
             file_bytes = path.read_bytes()
         except OSError:
             corrupt_archive_found = True
+            if selected:
+                preferred_rejection_reason = "Candidate-selected archived CV could not be read"
             continue
         checksum = sha256(file_bytes).hexdigest()
         if checksum != str(item["checksum"]):
@@ -164,6 +182,8 @@ def choose_application_cv(*, output_dir: Path, archived: list[dict[str, object]]
         text = _text(path)
         if not _contains_current_candidate_identity(text, candidate):
             identity_mismatch_found = True
+            if selected:
+                preferred_rejection_reason = "Candidate-selected archived CV did not match the current candidate name or email"
             continue
         score, reasons = assess_cv_fit(
             text, job=job, facts=usable_facts, records=usable_records, role_family=family,
@@ -171,23 +191,39 @@ def choose_application_cv(*, output_dir: Path, archived: list[dict[str, object]]
         )
         parsed = parse_requirements(str(job.get("description", "")))
         lowered_text = text.casefold()
-        if score >= 85 and all(term.casefold() in lowered_text for term in parsed.hard_requirements):
+        hard_requirements_match = all(term.casefold() in lowered_text for term in parsed.hard_requirements)
+        if score >= 85 and hard_requirements_match:
             adjustment = max(-8, min(8, int(learning.get(checksum, 0))))
             choice_reasons = reasons
             if adjustment:
                 choice_reasons = (*reasons, f"Confirmed application outcomes influenced this archived CV choice ({adjustment:+d})")
-            reusable.append((score + adjustment, score, -index, CVChoice(
+            choice = CVChoice(
                 path, "reused", family, language, score,
                 int(item.get("text_check_score", item.get("ats_score", 0))),
                 bool(item.get("text_check_performed")), choice_reasons, checksum,
-            )))
+            )
+            reusable.append((score + adjustment, score, -index, choice))
+            if selected:
+                preferred_choice = choice
+        elif selected:
+            reasons = []
+            if score < 85:
+                reasons.append(f"supported vacancy-evidence fit was {score}%, below the 85% reuse threshold")
+            if not hard_requirements_match:
+                reasons.append("it did not contain every parsed hard requirement")
+            preferred_rejection_reason = "Candidate-selected archived CV was not reused because " + " and ".join(reasons)
 
+    if preferred_choice:
+        return with_reason(preferred_choice, "Candidate-selected archived CV passed the current identity, role, language, evidence and hard-requirement checks")
     if reusable:
         best_fit = max(item[1] for item in reusable)
         # Outcome learning may break close ties, but never trade away more than
         # five points of present-day vacancy fit or any hard requirement.
         eligible = [item for item in reusable if item[1] >= best_fit - 5]
-        return max(eligible, key=lambda item: (item[0], item[1], item[2]))[3]
+        selected_choice = max(eligible, key=lambda item: (item[0], item[1], item[2]))[3]
+        if preferred_rejection_reason:
+            return with_reason(selected_choice, preferred_rejection_reason + "; automatic fit-based selection was used")
+        return selected_choice
 
     snapshot = {
         "job_id": job.get("id"), "title": job.get("title"), "description": job.get("description"),
@@ -221,6 +257,8 @@ def choose_application_cv(*, output_dir: Path, archived: list[dict[str, object]]
         cv_role_family=family, cv_language=language, language=language,
     )
     reasons = ["No archived CV met the 85% role, language and evidence threshold", *match_reasons]
+    if preferred_rejection_reason:
+        reasons.append(preferred_rejection_reason + "; a job-specific CV was generated")
     if identity_mismatch_found:
         reasons.append("An archived CV was excluded because its name or email does not match the current candidate profile")
     if corrupt_archive_found:

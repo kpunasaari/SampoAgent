@@ -215,6 +215,157 @@ def test_user_selected_archived_cv_also_requires_its_original_checksum(tmp_path:
         raise AssertionError("A changed archived CV must not be prepared for an application")
 
 
+def test_user_selected_cv_with_stale_identity_falls_back_to_current_profile_cv(tmp_path):
+    from pypdf import PdfReader
+    from reportlab.pdfgen.canvas import Canvas
+    from sampoagent.applications.packages import prepare_job_cv
+    from sampoagent.db.repository import Repository
+
+    repository = Repository(":memory:")
+    repository.initialize()
+    repository.load_demo()
+    selected = tmp_path / "old-warehouse-cv.pdf"
+    canvas = Canvas(str(selected))
+    canvas.drawString(50, 780, "Warehouse Worker")
+    canvas.drawString(50, 750, "Forklift operation")
+    canvas.drawString(50, 720, "Old Candidate")
+    canvas.drawString(50, 690, "old@example.test")
+    canvas.save()
+    checksum = sha256(selected.read_bytes()).hexdigest()
+    repository.archive_cv(
+        path=str(selected), checksum=checksum, language="en", role_family="warehouse_logistics",
+        source_job_id=None, fit_score=100, text_check_score=100, strategy="uploaded",
+    )
+
+    prepared = prepare_job_cv(
+        repository,
+        {"id": 42, "title": "Warehouse Worker", "description": "Forklift operation preferred.", "language": "en"},
+        tmp_path / "application-data",
+        requested_path=str(selected),
+    )
+
+    text = "\n".join(page.extract_text() or "" for page in PdfReader(str(prepared.choice.path)).pages)
+    assert prepared.choice.strategy == "generated"
+    assert prepared.choice.path != selected
+    assert "Aino Example" in text
+    assert "aino@example.test" in text
+    assert "Old Candidate" not in text
+    assert "old@example.test" not in text
+    assert "selected archived cv" in prepared.note.casefold()
+    repository.connection.close()
+
+
+def test_user_selected_weak_cv_falls_back_to_stronger_job_specific_generation(tmp_path):
+    from pypdf import PdfReader
+    from reportlab.pdfgen.canvas import Canvas
+    from sampoagent.applications.packages import prepare_job_cv
+    from sampoagent.db.repository import Repository
+
+    repository = Repository(":memory:")
+    repository.initialize()
+    repository.load_demo()
+    selected = tmp_path / "weak-warehouse-cv.pdf"
+    canvas = Canvas(str(selected))
+    canvas.drawString(50, 780, "Aino Example")
+    canvas.drawString(50, 750, "aino@example.test")
+    canvas.drawString(50, 720, "Warehouse Worker")
+    canvas.save()
+    repository.archive_cv(
+        path=str(selected), checksum=sha256(selected.read_bytes()).hexdigest(),
+        language="en", role_family="warehouse_logistics", source_job_id=None,
+        fit_score=100, text_check_score=100, strategy="uploaded",
+    )
+
+    prepared = prepare_job_cv(
+        repository,
+        {"id": 43, "title": "Warehouse Worker", "description": "Forklift operation preferred.", "language": "en"},
+        tmp_path / "application-data",
+        requested_path=str(selected),
+    )
+
+    text = "\n".join(page.extract_text() or "" for page in PdfReader(str(prepared.choice.path)).pages)
+    assert prepared.choice.strategy == "generated"
+    assert prepared.choice.path != selected
+    assert "forklift operation" in text.casefold()
+    assert "below the 85% reuse threshold" in prepared.note
+    repository.connection.close()
+
+
+def test_user_selected_weak_cv_falls_back_to_another_qualified_archive(tmp_path):
+    from reportlab.pdfgen.canvas import Canvas
+    from sampoagent.applications.packages import prepare_job_cv
+    from sampoagent.db.repository import Repository
+
+    repository = Repository(":memory:")
+    repository.initialize()
+    repository.load_demo()
+    selected = tmp_path / "weak-selected-cv.pdf"
+    canvas = Canvas(str(selected))
+    canvas.drawString(50, 780, "Aino Example")
+    canvas.drawString(50, 750, "aino@example.test")
+    canvas.drawString(50, 720, "Warehouse Worker")
+    canvas.save()
+    qualified = tmp_path / "qualified-alternative-cv.pdf"
+    canvas = Canvas(str(qualified))
+    canvas.drawString(50, 780, "Aino Example")
+    canvas.drawString(50, 750, "aino@example.test")
+    canvas.drawString(50, 720, "Warehouse Worker")
+    canvas.drawString(50, 690, "Forklift operation")
+    canvas.save()
+    for path in (selected, qualified):
+        repository.archive_cv(
+            path=str(path), checksum=sha256(path.read_bytes()).hexdigest(),
+            language="en", role_family="warehouse_logistics", source_job_id=None,
+            fit_score=100, text_check_score=100, strategy="uploaded",
+        )
+
+    prepared = prepare_job_cv(
+        repository,
+        {"id": 45, "title": "Warehouse Worker", "description": "Forklift operation preferred.", "language": "en"},
+        tmp_path / "application-data",
+        requested_path=str(selected),
+    )
+
+    assert prepared.choice.strategy == "reused"
+    assert prepared.choice.path == qualified
+    assert "automatic fit-based selection was used" in prepared.note
+    repository.connection.close()
+
+
+def test_user_selected_cv_is_reused_when_it_passes_current_fit_checks(tmp_path):
+    from reportlab.pdfgen.canvas import Canvas
+    from sampoagent.applications.packages import prepare_job_cv
+    from sampoagent.db.repository import Repository
+
+    repository = Repository(":memory:")
+    repository.initialize()
+    repository.load_demo()
+    selected = tmp_path / "matching-warehouse-cv.pdf"
+    canvas = Canvas(str(selected))
+    canvas.drawString(50, 780, "Aino Example")
+    canvas.drawString(50, 750, "aino@example.test")
+    canvas.drawString(50, 720, "Warehouse Worker")
+    canvas.drawString(50, 690, "Forklift operation")
+    canvas.save()
+    repository.archive_cv(
+        path=str(selected), checksum=sha256(selected.read_bytes()).hexdigest(),
+        language="en", role_family="warehouse_logistics", source_job_id=None,
+        fit_score=100, text_check_score=100, strategy="uploaded",
+    )
+
+    prepared = prepare_job_cv(
+        repository,
+        {"id": 44, "title": "Warehouse Worker", "description": "Forklift operation preferred.", "language": "en"},
+        tmp_path / "application-data",
+        requested_path=str(selected),
+    )
+
+    assert prepared.choice.strategy == "reused"
+    assert prepared.choice.path == selected
+    assert "passed the current identity" in prepared.note
+    repository.connection.close()
+
+
 def test_legacy_cv_archive_migration_marks_old_text_scores_unchecked(tmp_path: Path):
     import sqlite3
     from sampoagent.db.repository import Repository

@@ -1,5 +1,21 @@
 # SampoAgent engineering rules
 
+## Sequential initial setup — 2026-09-30
+
+The CLI enables `require_onboarding=True`. `app/setup_flow.py` tracks nine durable
+steps independently of the legacy `onboarding_complete` profile flag. Until final
+completion, root and workspace links redirect to the current step and premature
+POST requests are rejected. Seven reviewed questionnaire sections precede CV/profile
+review and target/mode selection. An earlier-section edit re-locks downstream steps.
+Do not make sensitive optional answers mandatory: each section requires an explicit
+review acknowledgment, while contact name/email are validated. CV upload may be
+replaced by an explicit manual-profile choice. Facts still require individual
+confirmation. Final scope requires a target and a positive cap; live modes retain
+their authorization checks. Both app and headless workers refuse work during setup.
+After completion, the app worker also supports discovery/preparation in Dry Run
+without creating an employer browser. Tests: `tests/test_sequential_onboarding.py`.
+Library app embeddings retain their existing behavior unless they opt into the gate.
+
 ## Offline occupation suggestions — 2026-09-30
 
 The built-in fallback matcher provides FI/EN skill aliases for 24 representative roles across multiple sectors. It is only a starter catalogue; never describe it as all occupations or as a qualification/eligibility check. Users may import their own downloaded ESCO CSV files into the local index for broader occupation coverage through Career Suggestions ZIP upload or the CLI directory importer. The app never submits the ESCO download email form; validate ZIP paths/size, extract only requested CSVs to a temporary directory, preserve the old index on failure, and keep the dataset out of Git. Do not send candidate skills to the public ESCO API. Recommendations never activate a search target automatically.

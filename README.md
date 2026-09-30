@@ -35,11 +35,27 @@ sampoagent run
 
 Open [http://127.0.0.1:8765](http://127.0.0.1:8765). The service intentionally binds only to localhost.
 
-`SampoAgent run` also supervises the local application worker. It starts only when Smart Approval or a valid Full Autopilot grant is active, Dry Run is off, the daily limit is positive, and the emergency stop is clear. The worker stops when those conditions no longer hold and is shut down with the app. The standalone `sampoagent automate --watch` command remains available for headless/manual operation.
+`SampoAgent run` also supervises the local application worker. It waits until the sequential setup is complete. Afterwards, Dry Run supports discovery and preparation; live applications require Smart Approval or a valid Full Autopilot grant, with Dry Run off. A positive daily limit and a clear emergency stop are required for the app worker. It stops when those conditions no longer hold and shuts down with the app. The standalone `sampoagent automate --watch` command remains available for headless/manual operation and also respects incomplete setup.
 
 `demo` loads clearly marked synthetic data. To start with an empty local profile instead, run `sampoagent init` and then `sampoagent run`. Use `sampoagent --help` for available commands.
 
 ## First-run workflow
+
+`sampoagent run` opens a sequential setup at the root URL. Seven questionnaire
+sections are followed by CV/profile review and job-target/mode selection. Each
+section must be explicitly reviewed and saved before the next unlocks; server-side
+checks also block direct links and premature form submissions. Name and a valid
+application email are required. Other answers can remain unknown or inapplicable;
+the review step accepts either a CV upload or an explicit manual-profile choice.
+Progress survives restart. Editing an earlier section during setup locks the later
+steps again until they are reviewed.
+
+The final step requires an explicit search target and positive daily limit. Finishing
+in Dry Run starts local job discovery and preparation without opening employer forms.
+Finishing with Smart Approval or Full Autopilot starts the worker under the selected
+mode and its existing permission checks. No worker runs before setup is complete.
+Library integrations can opt into the same UI gate with
+`create_app(..., require_onboarding=True)`; the CLI always enables it.
 
 1. Enter your own profile; a clean install never inserts a fictional candidate or job.
 2. Upload a PDF, DOCX, or TXT CV and review every extracted claim and dated work/education draft before using it. OCR is an optional local extra; if unavailable, the app asks for text entry instead of guessing.

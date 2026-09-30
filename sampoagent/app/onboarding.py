@@ -1,6 +1,7 @@
 """Local draft questionnaire. Answers are not automatically verified candidate facts."""
 from html import escape
 import json
+import re
 from collections.abc import Callable
 
 from fastapi import FastAPI, HTTPException, Request
@@ -15,6 +16,7 @@ from sampoagent.candidate.questions import (
     question_metadata,
 )
 from sampoagent.db.repository import Repository
+from sampoagent.app.setup_flow import STEPS, pending, step_index
 
 
 def register_questionnaire(app: FastAPI, repository: Repository, page: Callable) -> None:
@@ -26,17 +28,32 @@ def register_questionnaire(app: FastAPI, repository: Repository, page: Callable)
 
     @app.get('/landing', response_class=HTMLResponse)
     @app.get('/onboarding', response_class=HTMLResponse)
-    def questionnaire(section: str = 'contact', saved_ok: bool = False) -> HTMLResponse:
+    def questionnaire(section: str | None = None, saved_ok: bool = False) -> HTMLResponse:
+        guided = pending(repository)
+        if section is None:
+            section = STEPS[step_index(repository)] if guided else 'contact'
+            if section == 'ready':
+                return RedirectResponse('/onboarding/ready', status_code=303)
         if section not in SECTIONS and section != 'review':
             raise HTTPException(404, 'Unknown section')
         drafts = saved()
         total = sum(len(questions) for _, questions in SECTIONS.values())
         answered = sum(bool(value) for values in drafts.values() for value in values.values())
         nav = ''.join(f'<a href="/onboarding?section={key}" aria-current="{"step" if key == section else "false"}">{escape(title)}</a> ' for key, (title, _) in SECTIONS.items())
+        if guided:
+            nav = ''.join(
+                f'<a href="/onboarding?section={key}">{i + 1}. {escape(title)}</a> '
+                if i <= step_index(repository) else f'<span aria-disabled="true">{i + 1}. {escape(title)} · locked</span> '
+                for i, (key, (title, _)) in enumerate(SECTIONS.items())
+            )
         body = f'''<style>.question-nav{{display:flex;flex-wrap:wrap;gap:12px;margin:20px 0}}.question-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:20px}}.question-grid label{{display:flex;flex-direction:column;gap:8px}}.question-grid textarea{{width:100%;box-sizing:border-box;min-height:100px;background:#111827;color:#eee;border:1px solid #64748b;border-radius:8px;padding:12px;font:inherit}}.question-grid select{{width:100%}}</style>
         <section><h2>Build your application profile</h2><p>Answer once, review for each application. {answered} / {total} questions answered.</p><p>All questions are optional. Leave unknown or irrelevant answers blank; blank never means No. Drafts stay in this local database and are not automatically treated as verified facts or submission permission.</p><nav class="question-nav" aria-label="Profile sections">{nav}<a href="/onboarding?section=review">Review &amp; CV</a></nav></section>'''
         if saved_ok:
             body += '<p role="status">Draft saved on this device.</p>'
+        if guided:
+            body = body.replace('All questions are optional.', 'Name and email are required. Other questions may be left unanswered when unknown or not applicable; review each section before continuing.')
+            if step_index(repository) < STEPS.index('review'):
+                body = body.replace('<a href="/onboarding?section=review">Review &amp; CV</a>', '<span aria-disabled="true">8. Review &amp; CV · locked</span>')
         if section == 'review':
             body += '<form method="post" action="/onboarding/confirm"><section><h3>Confirm reusable answers</h3><p>Check only answers you have reviewed and confirm as accurate. They will enter the answer bank; legal, health, criminal-history, security and other high-risk declarations still stop for review.</p>'
             for key, (title, questions) in SECTIONS.items():
@@ -63,6 +80,8 @@ def register_questionnaire(app: FastAPI, repository: Repository, page: Callable)
             if not repository.profile():
                 name = escape(drafts.get('contact', {}).get('full_name', ''), quote=True)
                 body += f'<section><h3>Create candidate profile</h3><form method="post" action="/onboarding/complete"><label>Name <input name="name" value="{name}" required></label><label>Application language <select name="locale"><option value="en">English</option><option value="fi">Finnish</option></select></label><button>Create profile in Dry Run mode</button></form><p>Other answers remain drafts for review.</p></section>'
+            if guided:
+                body += '<section><h3>Finish your profile review</h3><form method="post" action="/onboarding/review-complete"><label><input type="checkbox" name="reviewed" value="yes" required> I have reviewed my answers and CV information. Only individually confirmed facts may be used.</label><label><input type="checkbox" name="without_cv" value="yes"> Continue with a manually entered profile without uploading a CV.</label><button>Continue to job targets and working mode</button></form></section>'
         else:
             title, questions = SECTIONS[section]
             body += f'<section><h3>{escape(title)}</h3><form method="post" action="/onboarding/questions/{section}"><div class="question-grid">'
@@ -73,7 +92,10 @@ def register_questionnaire(app: FastAPI, repository: Repository, page: Callable)
             for identifier, label, options in questions:
                 value = drafts.get(section, {}).get(identifier, '')
                 body += f'<label for="q-{identifier}">{escape(label)}'
-                if options:
+                if guided and section == 'contact' and identifier in {'full_name', 'email'}:
+                    input_type = 'email' if identifier == 'email' else 'text'
+                    body += f'<input id="q-{identifier}" type="{input_type}" name="{identifier}" value="{escape(value, quote=True)}" maxlength="320" required>'
+                elif options:
                     body += f'<select id="q-{identifier}" name="{identifier}"><option value="">Not answered / not applicable</option>'
                     body += ''.join(f'<option value="{escape(option)}"{" selected" if value == option else ""}>{escape(option)}</option>' for option in options) + '</select>'
                 else:
@@ -81,7 +103,10 @@ def register_questionnaire(app: FastAPI, repository: Repository, page: Callable)
                 body += '</label>'
             keys = [*SECTIONS, 'review']
             following = keys[keys.index(section) + 1]
-            body += f'</div><p><button type="submit">Save this section</button> <a href="/onboarding?section={following}">Next section / skip</a></p></form></section>'
+            if guided:
+                body += '</div><label><input type="checkbox" name="section_reviewed" value="yes" required> I have reviewed this section; blank answers mean unknown or not applicable.</label><p><button type="submit">Save and continue</button></p></form></section>'
+            else:
+                body += f'</div><p><button type="submit">Save this section</button> <a href="/onboarding?section={following}">Next section / skip</a></p></form></section>'
         return page('Application Profile', body, path='/onboarding')
 
     @app.post('/onboarding/confirm')
@@ -140,7 +165,9 @@ def register_questionnaire(app: FastAPI, repository: Repository, page: Callable)
             raise HTTPException(404, 'Unknown section')
         form = await request.form(max_fields=100, max_part_size=65536)
         fields = {key: options for key, _, options in SECTIONS[section][1]}
-        if set(form) - set(fields) or len(form.multi_items()) != len(form):
+        guided = pending(repository)
+        allowed_fields = set(fields) | ({'section_reviewed'} if guided else set())
+        if set(form) - allowed_fields or len(form.multi_items()) != len(form):
             raise HTTPException(422, 'Unknown or repeated question')
         answers = {}
         for key, options in fields.items():
@@ -153,6 +180,30 @@ def register_questionnaire(app: FastAPI, repository: Repository, page: Callable)
             answers[key] = value
         if section == 'eligibility' and not answers['work_country'] and any(answers[key] for key in ('work_permission', 'sponsorship_now', 'sponsorship_future')):
             raise HTTPException(422, 'Specify the country for work eligibility answers')
+        if guided:
+            if form.get('section_reviewed') != 'yes':
+                raise HTTPException(422, 'Review this section before continuing')
+            if section == 'contact' and (not answers['full_name'] or len(answers['full_name']) > 320 or len(answers['email']) > 320 or not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+', answers['email'])):
+                raise HTTPException(422, 'Enter your name and a valid application email address')
         with repository.connection:
             repository.connection.execute('INSERT INTO questionnaire_drafts VALUES (?, ?, ?) ON CONFLICT(section) DO UPDATE SET answers=excluded.answers, version=excluded.version', (section, json.dumps(answers), VERSION))
+        if guided:
+            if section == 'contact':
+                repository.save_profile(answers['full_name'], 'en', answers['email'])
+            repository.set_setting('setup_step', str(STEPS.index(section) + 1))
+            return RedirectResponse('/onboarding?section=' + STEPS[STEPS.index(section) + 1], status_code=303)
         return RedirectResponse(f'/onboarding?section={section}&saved_ok=true', status_code=303)
+
+    @app.post('/onboarding/review-complete')
+    async def finish_review(request: Request) -> RedirectResponse:
+        form = await request.form()
+        if not pending(repository) or step_index(repository) < STEPS.index('review'):
+            raise HTTPException(409, 'Complete the questionnaire first')
+        if set(form) - {'reviewed', 'without_cv'} or len(form.multi_items()) != len(form):
+            raise HTTPException(422, 'Unknown or repeated review field')
+        if form.get('reviewed') != 'yes':
+            raise HTTPException(422, 'Review your profile before continuing')
+        if not repository.documents(kind='uploaded_cv') and form.get('without_cv') != 'yes':
+            raise HTTPException(422, 'Upload a CV or choose to continue with a manually entered profile')
+        repository.set_setting('setup_step', str(STEPS.index('ready')))
+        return RedirectResponse('/onboarding/ready', status_code=303)

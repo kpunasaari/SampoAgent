@@ -13,8 +13,8 @@ import sqlite3
 import time
 from urllib.parse import quote, urlsplit
 
-from fastapi import FastAPI, File, Form, Query, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
+from fastapi import FastAPI, File, Form, Query, Request, UploadFile, HTTPException
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response, JSONResponse
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from sampoagent.applications.answers import save_answer
@@ -181,12 +181,15 @@ def create_app(
     storage_dir: str | Path = "application_data",
     manage_automation_worker: bool = False,
     automation_worker: object | None = None,
+    require_onboarding: bool = False,
 ) -> FastAPI:
     from dotenv import load_dotenv
 
     load_dotenv(override=False)
     repository = Repository(database_path)
     repository.initialize()
+    if require_onboarding:
+        repository.set_setting("guided_onboarding", "true")
     if demo_data:
         repository.load_demo()
     app = FastAPI(title="SampoAgent", docs_url=None, redoc_url=None)
@@ -195,6 +198,31 @@ def create_app(
     app.state.repository = repository
     app.state.email_oauth_states = {}
     app.state.local_action_token = secrets.token_hex(32)
+    from sampoagent.app.setup_flow import allowed as setup_allowed, current_url as setup_url, pending as setup_pending
+
+    @app.exception_handler(HTTPException)
+    async def setup_validation_error(request: Request, error: HTTPException):
+        if setup_pending(repository) and request.url.path.startswith('/onboarding') and error.status_code == 422:
+            return HTMLResponse(
+                _page('Complete this step', '<section><p role="alert">' + escape(str(error.detail))
+                      + '</p><p>Use your browser’s Back button to keep your entered answers, or return to the saved step.</p><a href="'
+                      + setup_url(repository) + '">Return to setup</a></section>').body,
+                status_code=422,
+            )
+        return JSONResponse({'detail': error.detail}, status_code=error.status_code, headers=error.headers)
+
+    @app.middleware("http")
+    async def enforce_setup_sequence(request: Request, call_next):
+        if setup_pending(repository) and not setup_allowed(repository, request.url.path, request.query_params.get("section")):
+            if request.method in {"GET", "HEAD"}:
+                return RedirectResponse(setup_url(repository), status_code=303)
+            return HTMLResponse(
+                '<p>Complete the current setup step first.</p><a href="' + setup_url(repository) + '">Continue setup</a>',
+                status_code=409,
+            )
+        response = await call_next(request)
+        response.headers["Cache-Control"] = "no-store"
+        return response
     app.add_middleware(
         _EscoUploadBodyLimitMiddleware,
         max_bytes=MAX_ESCO_ARCHIVE_BYTES + 64 * 1024,
@@ -2105,11 +2133,25 @@ def create_app(
     from sampoagent.app.onboarding import register_questionnaire
     from sampoagent.app.launch_review import register_launch_review
 
-    register_questionnaire(app, repository, _page)
+    def setup_page(title: str, body: str, **kwargs) -> HTMLResponse:
+        if setup_pending(repository):
+            from sampoagent.app.setup_flow import STEPS, step_index
+            index = step_index(repository)
+            title = 'Set up SampoAgent'
+            body = (
+                '<style>.sidebar{display:none}.app-shell{display:block}.main-content{max-width:1100px;margin:auto}.question-nav [aria-disabled="true"]{opacity:.5} progress{width:100%;accent-color:#8b7cff}</style>'
+                f'<section><p>Setup · {index} of {len(STEPS)} steps completed</p>'
+                f'<progress value="{index}" max="{len(STEPS)}" aria-label="Setup progress"></progress>'
+                '<p>Your progress is saved on this device. Complete each step to unlock the next one.</p></section>'
+                + body
+            )
+        return _page(title, body, **kwargs)
+
+    register_questionnaire(app, repository, setup_page)
     register_launch_review(
         app,
         repository,
-        _page,
+        setup_page,
         occupation_recommendations,
         lambda: run_discovery_preview(repository),
         sync_automation_worker,

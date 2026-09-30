@@ -24,6 +24,10 @@ class WorkerReport:
 
 def run_worker_cycle(repository: object, browser: object, *, discover: bool = True, owner: str | None = None, storage_dir: Path = Path("application_data"), next_run_seconds: int | None = None, email_sender: Callable[..., EmailSendResult] | None = None) -> WorkerReport:
     """Discover, then process ready items while holding the SQLite worker lease."""
+    from sampoagent.app.setup_flow import pending
+
+    if pending(repository):
+        return WorkerReport("setup_required")
     lease_owner = owner or str(uuid4())
     if not repository.acquire_worker_lease(lease_owner):
         return WorkerReport("busy")

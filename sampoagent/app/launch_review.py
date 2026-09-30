@@ -12,6 +12,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from sampoagent.careers.recommendations import OccupationRecommendation
 from sampoagent.db.repository import Repository
 from sampoagent.jobs.discovery import SearchPlan
+from sampoagent.app.setup_flow import pending as setup_pending
 
 
 _MODES = {"review_everything", "smart_approval", "autopilot"}
@@ -236,6 +237,9 @@ def register_launch_review(
 </section></form>
 <section><h3>Next steps</h3><p><a href='/onboarding?section=review'>Finish profile questionnaire</a> · <a href='/profile'>Review candidate facts</a> · <a href='/careers'>Detailed career suggestions</a> · <a href='/jobs'>Review jobs and explicitly start a search</a> · <a href='/settings'>Advanced settings</a></p></section>
 """
+        if setup_pending(repository):
+            body = body.replace('Save review only · keep Dry Run on', 'Finish setup · start job search in Dry Run')
+            body = body.replace('Enable selected live mode', 'Finish setup · start selected live mode')
         return page("Guided Search Review", body, path="/onboarding/ready")
 
     @app.post("/onboarding/ready")
@@ -287,6 +291,16 @@ def register_launch_review(
             suggestions | saved_targets,
         )
 
+        finishing_setup = setup_pending(repository)
+        if finishing_setup:
+            if not repository.profile():
+                raise HTTPException(422, "Complete your contact profile first")
+            has_profiles = any(bool(item.get("enabled")) for item in repository.rows("career_profiles"))
+            if not chosen_roles and not has_profiles and not scope["search_terms_include"]:
+                raise HTTPException(422, "Choose a target occupation or enter a job-search phrase to finish setup")
+            if daily_limit <= 0:
+                raise HTTPException(422, "Choose a positive daily limit to finish setup")
+
         if action == "enable_mode":
             if mode == "review_everything" or live_ack != "yes":
                 raise HTTPException(422, "Select Smart Approval or Full Autopilot and explicitly confirm live mode")
@@ -330,4 +344,10 @@ def register_launch_review(
                 raise HTTPException(422, "Could not authorize Full Autopilot for this saved scope; Dry Run remains on") from None
             sync_worker()
             notice = "Full Autopilot authorized for up to 30 days within the saved roles, preferences, and daily limit."
+        if finishing_setup:
+            repository.set_setting("setup_finished", "true")
+            sync_worker()
+            if action == 'save_review':
+                notice = 'Job search is enabled in Dry Run. Applications remain unsent until you choose a live mode.'
+            return RedirectResponse("/?notice=" + quote("Setup complete. " + notice), status_code=303)
         return RedirectResponse("/onboarding/ready?notice=" + quote(notice), status_code=303)

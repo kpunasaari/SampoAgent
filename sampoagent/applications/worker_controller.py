@@ -72,10 +72,19 @@ class AutopilotWorkerController:
             )
 
     def _eligible(self, repository: Repository) -> bool:
+        from sampoagent.app.setup_flow import pending
+
+        if pending(repository):
+            return False
         mode = repository.setting("application_mode") or "review_everything"
+        setup_discovery = (
+            repository.setting("guided_onboarding") == "true"
+            and repository.setting("setup_finished") == "true"
+            and repository.setting("dry_run") == "true"
+            and mode in {"review_everything", "smart_approval", "autopilot"}
+        )
         if (
-            mode not in {"smart_approval", "autopilot"}
-            or repository.setting("dry_run") != "false"
+            (not setup_discovery and (mode not in {"smart_approval", "autopilot"} or repository.setting("dry_run") != "false"))
             or repository.setting("automation_paused") == "true"
         ):
             return False
@@ -84,7 +93,7 @@ class AutopilotWorkerController:
                 return False
         except ValueError:
             return False
-        return mode != "autopilot" or repository.autopilot_authorized()
+        return setup_discovery or mode != "autopilot" or repository.autopilot_authorized()
 
     def _authorized_now(self) -> bool:
         repository = Repository(self.database_path)
@@ -146,7 +155,7 @@ class AutopilotWorkerController:
                     repository = Repository(self.database_path)
                     if not self._eligible(repository):
                         break
-                    if browser is None:
+                    if browser is None and repository.setting("dry_run") == "false":
                         browser = self.browser_factory(self.storage_dir / "browser-profile")
                     now = monotonic()
                     discover = now - last_discovery >= self.discovery_interval_seconds

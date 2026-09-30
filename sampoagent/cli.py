@@ -137,7 +137,7 @@ def main() -> None:
         try:
             with LocalRuntimeLock(runtime_lock_paths(args.database, args.storage_dir)):
                 uvicorn.run(
-                    create_app(args.database, storage_dir=args.storage_dir, manage_automation_worker=True),
+                    create_app(args.database, storage_dir=args.storage_dir, manage_automation_worker=True, require_onboarding=True),
                     host="127.0.0.1",
                     port=args.port,
                     access_log=False,

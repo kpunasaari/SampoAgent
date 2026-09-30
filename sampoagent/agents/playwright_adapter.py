@@ -20,7 +20,13 @@ from sampoagent.applications.urls import is_safe_public_https_url, is_same_publi
 
 _SUBMIT_TEXT = re.compile(r"\b(apply|submit|send application|send my application|lähetä hakemus|jätä hakemus|hae paikkaa)\b", re.IGNORECASE)
 _NEXT_STEP_TEXT = re.compile(r"\b(next|continue|save and continue|jatka|seuraava|nästa|fortsätt|gå vidare)\b", re.IGNORECASE)
-_CAPTCHA_SELECTOR = "iframe[src*='recaptcha'], iframe[src*='hcaptcha'], [data-sitekey], .g-recaptcha, .h-captcha, input[name*='captcha' i]"
+_CAPTCHA_SELECTOR = (
+    "iframe[src*='captcha' i], iframe[src*='turnstile' i], iframe[src*='challenge-platform' i], "
+    "iframe[title*='captcha' i], iframe[title*='challenge' i], [data-sitekey], [data-pkey], "
+    "[data-captcha], .g-recaptcha, .h-captcha, .cf-turnstile, .frc-captcha, .geetest_holder, "
+    "[id*='cf-challenge' i], [id*='challenge-stage' i], [id*='turnstile' i], "
+    "input[name*='captcha' i], input[name*='turnstile' i], input[name*='cf-chl' i]"
+)
 _CONFIRMATION_MARKERS = ("application received", "application submitted", "thank you for applying", "thank you for your application", "hakemuksesi on vastaanotettu", "kiitos hakemuksestasi", "hakemus lähetetty")
 
 

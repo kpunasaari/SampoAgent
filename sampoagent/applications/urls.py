@@ -8,7 +8,12 @@ from urllib.parse import parse_qsl, urlsplit
 _RESERVED_HOSTS = {"example.com", "example.net", "example.org", "localhost"}
 _RESERVED_SUFFIXES = (".test", ".invalid", ".example", ".localhost", ".local")
 _SENSITIVE_QUERY_KEYS = {"token", "access_token", "session", "sessionid", "validator", "code", "secret", "auth", "password", "key", "signature", "sig", "jwt"}
-_CAPTCHA_MARKERS = ("captcha", "recaptcha", "hcaptcha", "verify that you are human", "prove you are not a robot", "en ole robotti", "varmista että olet ihminen")
+_CAPTCHA_MARKERS = (
+    "captcha", "recaptcha", "hcaptcha", "turnstile", "cf-chl-", "/cdn-cgi/challenge-platform/",
+    "challenges.cloudflare.com", "verify that you are human", "verify you are human",
+    "prove you are not a robot", "checking your browser", "complete the security check",
+    "en ole robotti", "varmista että olet ihminen",
+)
 _LOGIN_PATH_MARKERS = ("/login", "/log-in", "/signin", "/sign-in", "/authenticate", "/auth/")
 
 

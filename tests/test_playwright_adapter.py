@@ -577,6 +577,40 @@ def test_synthetic_finnish_swedish_english_ats_form_shape_matrix():
         browser.close()
 
 
+def test_inspector_holds_cloudflare_turnstile_iframe_before_form_fill():
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.route("https://challenges.cloudflare.com/**", lambda route: route.abort())
+        page.set_content(
+            """<!doctype html><form action="/apply">
+            <label for="name">Full name</label><input id="name" name="name" required>
+            <iframe title="Widget containing a Cloudflare security challenge"
+              src="https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/b/turnstile/if/0x4AAAA"></iframe>
+            <button type="submit">Apply</button></form>"""
+        )
+        agent = object.__new__(PlaywrightBrowserAgent)
+        agent._context = browser
+        agent._page = page
+        agent._allowed_origin = None
+        agent._restrict_cross_origin = True
+        agent._fields = {}
+        agent._kinds = {}
+        agent._radio_options = {}
+        agent._file_constraints = {}
+        agent._multiple_file_fields = set()
+        agent._submit_buttons = []
+        agent._next_buttons = []
+
+        inspection = agent.inspect_form()
+
+        assert inspection.captcha_detected
+        assert [field.field_id for field in inspection.fields] == ["name"]
+        browser.close()
+
+
 def test_browser_request_guard_does_not_resolve_dns_before_proxy(monkeypatch):
     def should_not_resolve(*_args, **_kwargs):
         raise AssertionError("The pinned proxy performs the definitive DNS resolution")

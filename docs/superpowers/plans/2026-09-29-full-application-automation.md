@@ -392,6 +392,11 @@ These notes are chronological; later dated progress updates supersede earlier st
 - Test-first verification reproduced existing-job, per-result discovery, and deleted-source persistence gaps. Focused tests: 59 passed; whole suite: 542 passed with one existing Starlette/httpx TestClient deprecation warning. `compileall`, CLI help, and `git diff --check` passed.
 - Monthly salary matching now uses only explicit monthly EUR values; only a known upper bound below the saved floor is excluded, while missing or incomparable salary remains visible. Radius still needs reliable coordinates/distance, so the broader preference-mapping item remains partially open. No candidate database, employer site, or real application was used; release gates remain open as specified above.
 
+### CAPTCHA challenge recognition — 2026-09-30
+
+- A real-Chromium synthetic regression found Cloudflare Turnstile's challenge-platform iframe was not recognized by the CAPTCHA selector, allowing inspection to proceed as an ordinary form. Detection now covers common CAPTCHA/challenge iframe URL/title patterns, Turnstile/Cloudflare/Friendly Captcha/geetest widget and response-field markers, Cloudflare challenge-stage nodes, and visible managed-challenge text/path signals. CAPTCHA is still user-only, queued durably one at a time; other eligible applications continue.
+- Two new regression tests failed before the fix and passed after, including a local Chromium page with a blocked (non-networked) Cloudflare challenge iframe. Full suite: `py -m pytest -q` → 547 passed, one existing upstream Starlette/httpx TestClient deprecation warning. Detection is heuristic rather than exhaustive, and employer staging, supported-platform egress, supervised privacy review and pilot gates remain open.
+
 ### Monthly salary preference matching — 2026-09-30
 
 - The saved salary floor now participates in shared deterministic matching for discovery results, existing listings, queue eligibility and Autopilot's final gate. The parser handles explicit EUR monthly amounts in English, Finnish and Swedish, including numeric ranges and “from/up to” qualifiers; it does not annualize or convert hourly, non-EUR, ambiguous or missing values.

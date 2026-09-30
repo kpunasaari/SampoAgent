@@ -28,6 +28,12 @@ def test_credentials_tokens_private_hosts_and_insecure_schemes_are_rejected():
 def test_captcha_and_login_pages_are_detected_without_interacting_with_them():
     assert looks_like_captcha_page("https://jobs.fi/apply", "Please verify that you are human", False)
     assert looks_like_captcha_page("https://jobs.fi/apply", "Apply now", True)
+    assert looks_like_captcha_page(
+        "https://jobs.fi/apply", "Checking your browser before accessing this site", False,
+    )
+    assert looks_like_captcha_page(
+        "https://jobs.fi/cdn-cgi/challenge-platform/", "Apply now", False,
+    )
     assert looks_like_authentication_page("https://jobs.fi/sign-in", 0)
     assert looks_like_authentication_page("https://jobs.fi/apply", 1)
     assert not looks_like_authentication_page("https://jobs.fi/apply", 0)

@@ -1110,11 +1110,7 @@ def test_synthetic_employer_e2e_posts_exact_cv_once_and_records_same_origin_rece
         fit_score=30, ats_score=100, strategy="uploaded",
     )
     host = "careers.northstar-logistics.fi"
-    html = """<!doctype html><meta charset="utf-8"><form method="post" enctype="multipart/form-data" action="/apply/warehouse">
-      <label for="full-name">Full name</label><input id="full-name" name="full_name" required>
-      <label for="email">Email address</label><input id="email" name="email" type="email" required>
-      <label for="resume">Upload your CV</label><input id="resume" name="resume" type="file" accept="application/pdf,.pdf" required>
-      <button type="submit">Apply</button></form>"""
+    html = (Path(__file__).parent / "fixtures" / "ats" / "laura" / "application.html").read_text(encoding="utf-8")
     captured_gets = []
     captured_posts = []
     response_body = b"<!doctype html><h1>Application received</h1>"
@@ -1277,7 +1273,12 @@ def test_synthetic_employer_e2e_posts_exact_cv_once_and_records_same_origin_rece
         elif field_name:
             submitted_fields[field_name] = payload.decode("utf-8")
 
-    assert submitted_fields == {"full_name": "Aino Example", "email": "aino@example.test"}
+    assert submitted_fields == {
+        "full_name": "Aino Example",
+        "email": "aino@example.test",
+        "phone": "",
+        "source": "",
+    }
     assert len(uploaded_parts) == 1
     assert uploaded_parts[0][0] == cv_path.name
     assert sha256(uploaded_parts[0][1]).hexdigest() == sha256(cv_bytes).hexdigest()

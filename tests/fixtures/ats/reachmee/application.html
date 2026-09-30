@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Synthetic multi-step form</title></head>
+<body>
+  <main>
+    <div role="progressbar" aria-valuemin="1" aria-valuemax="2" aria-valuenow="1">
+      Step 1 of 2 — Contact details
+    </div>
+    <form method="post" action="/fixture/reachmee/step-1">
+      <fieldset>
+        <legend>Are you legally authorized to work in Finland?</legend>
+        <label><input type="radio" name="work_eligibility" value="yes" required>Yes</label>
+        <label><input type="radio" name="work_eligibility" value="no">No</label>
+      </fieldset>
+
+      <label for="availability">Availability</label>
+      <select id="availability" name="availability" required>
+        <option value="">Choose one</option>
+        <option value="immediate">Immediately</option>
+        <option value="notice">After notice period</option>
+      </select>
+      <button type="button">Continue</button>
+    </form>
+  </main>
+</body>
+</html>

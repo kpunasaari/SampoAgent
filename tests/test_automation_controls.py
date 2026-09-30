@@ -362,6 +362,62 @@ def test_submission_result_pauses_for_captcha_and_never_retries_unknown_outcome(
     assert repository.application(other)["queue_state"] == "DO_NOT_RETRY"
 
 
+def test_untrusted_browser_diagnostic_is_not_persisted_in_application_timeline():
+    from sampoagent.agents.browser import SubmissionResult
+    from sampoagent.applications.workflow import record_submission_result
+
+    repository = Repository(":memory:")
+    repository.initialize()
+    repository.load_demo()
+    _set_public_captcha_test_urls(repository)
+    application_id = repository.queue_application(1, language="en", cv_path=None)
+    private_diagnostic = (
+        "candidate@example.test +358 40 123 4567 "
+        "access_token=synthetic-secret C:\\Users\\candidate\\cv.pdf"
+    )
+
+    result = SubmissionResult(
+        False,
+        True,
+        private_diagnostic,
+        "https://careers.northstar-logistics.fi/apply/warehouse",
+    )
+
+    assert record_submission_result(repository, application_id, result) == "NEEDS_USER"
+    timeline = repository.application_timeline(application_id)
+    assert timeline[-1]["note"] == "The form needs manual review."
+    assert private_diagnostic not in str(timeline)
+    assert "candidate@example.test" not in str(timeline)
+    repository.connection.close()
+
+
+def test_untrusted_browser_receipt_content_is_not_persisted_as_confirmation():
+    from sampoagent.agents.browser import SubmissionResult
+    from sampoagent.applications.workflow import record_submission_result
+
+    repository = Repository(":memory:")
+    repository.initialize()
+    repository.load_demo()
+    _set_public_captcha_test_urls(repository)
+    application_id = repository.queue_application(1, language="en", cv_path=None)
+
+    result = SubmissionResult(
+        True,
+        False,
+        "Application received for candidate@example.test; access_token=synthetic-secret",
+        "https://careers.northstar-logistics.fi/confirmation",
+        confirmation_id="candidate@example.test",
+    )
+
+    assert record_submission_result(repository, application_id, result) == "APPLIED"
+    evidence = repository.submission_evidence_for_application(application_id)[0]
+    assert evidence["confirmation_message"] == "Employer confirmation detected on the page."
+    assert evidence["confirmation_id"] is None
+    assert "candidate@example.test" not in str(evidence)
+    assert "synthetic-secret" not in str(evidence)
+    repository.connection.close()
+
+
 @pytest.mark.parametrize(
     "browser_url",
     [

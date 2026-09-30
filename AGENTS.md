@@ -67,6 +67,7 @@ For job-search and application tasks in this repository, use `.agents/skills/sam
 - This product setting does not authorize the Codex assistant itself to submit an application. Agent-assisted final submissions still require job-specific user confirmation.
 - Smart Approval binds destination/listing data, form signature, prepared answers and attachment name/SHA-256. Immediately before its one submit click, the browser adapter must re-read the live form's actual selected-file name/checksum and compare the exact expected upload set; any mismatch is a known pre-submit stop, never a click or an uncertain submission.
 - CAPTCHA, authentication/MFA, unknown/conflicting facts, high-impact legal/medical/criminal/identity/immigration declarations, unsupported forms and uncertain post-submit results remain manual; ambiguous submissions are never retried.
+- Browser-adapter result strings are untrusted: failure diagnostics are never persisted verbatim, successful receipts use fixed generic text, and only short reference-shaped IDs are retained. Never include page text, candidate data, credentials, provider exceptions or raw form values in logs/timelines.
 - Verified gaps and the staged implementation plan: `docs/superpowers/specs/2026-09-29-full-application-automation-design.md` and `docs/superpowers/plans/2026-09-29-full-application-automation.md`. Do not describe the system as production-ready until the synthetic ATS matrix, staging adapter checks, mail-send permission flow, backup/restore and pilot gates pass.
 
 ## CV structure and country guidance — 2026-09-29

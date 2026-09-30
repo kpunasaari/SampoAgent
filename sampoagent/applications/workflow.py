@@ -1,5 +1,6 @@
 """Application safety policy: uncertainty always stops final submission."""
 
+import re
 from enum import StrEnum
 from typing import Any
 
@@ -93,15 +94,36 @@ def record_submission_result(repository: Any, application_id: int, result: Any) 
         repository.finish_submission_attempt(application_id, state="UNKNOWN", message="Browser outcome could not be verified; automatic retry disabled")
         return "SUBMITTED_UNVERIFIED"
     if result.submitted and result.final_url and result.message:
-        repository.add_submission_evidence(application_id=application_id, final_url=result.final_url, confirmation_message=result.message, confirmation_id=result.confirmation_id, agent_provider="browser")
+        repository.add_submission_evidence(
+            application_id=application_id,
+            final_url=result.final_url,
+            confirmation_message="Employer confirmation detected on the page.",
+            confirmation_id=_safe_browser_confirmation_id(result.confirmation_id),
+            agent_provider="browser",
+        )
         repository.update_application_status(application_id, "APPLIED", "Employer confirmation recorded.", queue_state="COMPLETED")
         repository.finish_submission_attempt(application_id, state="SUBMITTED", message="Employer confirmation recorded")
         return "APPLIED"
     repository.update_application_status(
         application_id,
         "NEEDS_USER",
-        result.message[:300] or "The form needs manual review.",
+        "The form needs manual review.",
         queue_state="WAITING_USER",
     )
     repository.finish_submission_attempt(application_id, state="FAILED", message="Submission was not confirmed; user review required")
     return "NEEDS_USER"
+
+
+def _safe_browser_confirmation_id(value: object) -> str | None:
+    """Keep only short, reference-shaped IDs from an untrusted browser adapter."""
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if not re.fullmatch(r"[A-Za-z]{2,12}-[A-Za-z0-9]{1,12}", candidate):
+        return None
+    if re.search(r"\d{7,}", candidate) or any(
+        marker in candidate.casefold()
+        for marker in ("password", "passwd", "token", "secret", "email", "phone")
+    ):
+        return None
+    return candidate

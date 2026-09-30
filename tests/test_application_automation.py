@@ -710,3 +710,106 @@ def test_runner_passes_the_reviewed_cv_checksum_to_the_final_submit_guard(tmp_pa
     assert browser.submitted == 0
     assert repository.application(application_id)["queue_state"] == "WAITING_USER"
     repository.connection.close()
+
+
+def test_synthetic_employer_e2e_posts_exact_cv_once_and_records_same_origin_receipt(tmp_path):
+    from email.parser import BytesParser
+    from email.policy import default
+
+    from playwright.sync_api import sync_playwright
+
+    from sampoagent.agents.playwright_adapter import PlaywrightBrowserAgent
+
+    repository, application_id = _authorized_repository(tmp_path)
+    cv_path = tmp_path / "approved-resume.pdf"
+    cv_bytes = b"%PDF-1.4\nsynthetic reviewed candidate CV\n%%EOF"
+    cv_path.write_bytes(cv_bytes)
+    repository.update_application_cv_path(application_id, str(cv_path))
+    application_url = str(repository.job(1)["application_url"])
+    html = """<!doctype html><meta charset="utf-8"><form method="post" enctype="multipart/form-data" action="/apply/warehouse">
+      <label for="full-name">Full name</label><input id="full-name" name="full_name" required>
+      <label for="email">Email address</label><input id="email" name="email" type="email" required>
+      <label for="resume">Upload your CV</label><input id="resume" name="resume" type="file" accept="application/pdf,.pdf" required>
+      <button type="submit">Apply</button></form>
+      <script>
+        document.querySelector('form').addEventListener('submit', async event => {
+          event.preventDefault();
+          const form = event.currentTarget;
+          const values = new FormData(form);
+          const file = values.get('resume');
+          const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer());
+          const sha256 = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+          await window.recordSyntheticForm({
+            fullName: values.get('full_name'), email: values.get('email'),
+            fileName: file.name, fileSize: file.size, fileSha256: sha256,
+          });
+          HTMLFormElement.prototype.submit.call(form);
+        }, { once: true });
+      </script>"""
+    captured_posts = []
+    captured_forms = []
+
+    with sync_playwright() as playwright:
+        chromium = playwright.chromium.launch(headless=True)
+        page = chromium.new_page()
+        page.expose_function("recordSyntheticForm", lambda data: captured_forms.append(data))
+
+        def employer_page(route):
+            request = route.request
+            if request.method == "POST":
+                captured_posts.append((dict(request.headers), request.post_data_buffer))
+                route.fulfill(
+                    status=200,
+                    content_type="text/html",
+                    body="<!doctype html><h1>Application received</h1>",
+                )
+            else:
+                route.fulfill(status=200, content_type="text/html", body=html)
+
+        page.route("https://careers.northstar-logistics.fi/**", employer_page)
+        browser = PlaywrightBrowserAgent(tmp_path / "browser-profile")
+        browser._context = chromium
+        browser._page = page
+        try:
+            result = process_application(repository, application_id, browser)
+        finally:
+            browser.close()
+
+    application = repository.application(application_id)
+    attempts = repository.connection.execute(
+        "SELECT state FROM application_attempts WHERE application_id=?",
+        (application_id,),
+    ).fetchall()
+    assert result == "APPLIED", application["notes"]
+    assert application["status"] == "APPLIED"
+    assert len(attempts) == 1
+    assert attempts[0]["state"] == "SUBMITTED"
+    assert len(captured_posts) == 1
+    assert captured_forms == [{
+        "fullName": "Aino Example",
+        "email": "aino@example.test",
+        "fileName": cv_path.name,
+        "fileSize": len(cv_bytes),
+        "fileSha256": sha256(cv_bytes).hexdigest(),
+    }]
+
+    headers, body = captured_posts[0]
+    message = BytesParser(policy=default).parsebytes(
+        f"Content-Type: {headers['content-type']}\r\nMIME-Version: 1.0\r\n\r\n".encode() + body
+    )
+    submitted_fields = {}
+    uploaded_parts = []
+    for part in message.iter_parts():
+        field_name = part.get_param("name", header="content-disposition")
+        payload = part.get_payload(decode=True) or b""
+        if part.get_filename():
+            uploaded_parts.append((part.get_filename(), payload))
+        elif field_name:
+            submitted_fields[field_name] = payload.decode("utf-8")
+
+    assert submitted_fields == {"full_name": "Aino Example", "email": "aino@example.test"}
+    assert len(uploaded_parts) == 1
+    assert uploaded_parts[0][0] == cv_path.name
+    evidence = repository.submission_evidence_for_application(application_id)
+    assert evidence[0]["final_url"] == application_url
+    repository.connection.close()

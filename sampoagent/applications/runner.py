@@ -200,8 +200,6 @@ def _process_claimed_application(repository: object, application_id: int, browse
         return _wait_for_user(repository, application_id, "NEEDS_USER", "The form submission action points to a different origin; no candidate data was entered.")
     if schema and schema.has_next_step:
         return _wait_for_user(repository, application_id, "NEEDS_USER", "This is a multi-step form that needs page-by-page review; no candidate data was entered.")
-    if inspection.validation_errors:
-        return _wait_for_user(repository, application_id, "NEEDS_USER", "The application form reports validation errors before entry.")
     if not inspection.submit_control_ready:
         return _wait_for_user(repository, application_id, "NEEDS_USER", "No unique application submit control was detected.")
     if not inspection.fields:
@@ -388,6 +386,9 @@ def _process_claimed_application(repository: object, application_id: int, browse
                     "Candidate information or application scope changed before the CV upload; review it before resuming.",
                 )
             browser.upload(selected_upload.field_id, cv_path)
+        # Native required inputs are expected to be invalid before confirmed
+        # answers and the selected CV have been entered. Validate completeness
+        # only after that bounded fill phase; unresolved answers already stop above.
         errors = tuple(browser.validation_errors())
         after_fill = browser.inspect_form()
     except Exception:

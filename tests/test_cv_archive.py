@@ -537,6 +537,45 @@ def test_archived_cv_reuse_fit_includes_confirmed_experience_records(tmp_path: P
     assert choice.score == 100
 
 
+def test_archived_cv_reuse_uses_same_record_relevance_as_job_scoring(tmp_path: Path):
+    """A related confirmed record should not be lost just because wording differs."""
+    from reportlab.pdfgen.canvas import Canvas
+    from sampoagent.scoring.job_score import evaluate_job
+
+    template = tmp_path / "school-cleaner.pdf"
+    canvas = Canvas(str(template))
+    canvas.drawString(50, 780, "School Cleaner")
+    canvas.drawString(50, 750, "Aino Example")
+    canvas.drawString(50, 720, "aino@example.test")
+    canvas.save()
+
+    job = {
+        "id": 34, "title": "Cleaner / Housekeeper",
+        "description": "The role covers school classrooms.", "language": "en",
+    }
+    records = {"experience": [{
+        "review_state": "CONFIRMED", "title": "School Cleaner", "details": "",
+    }]}
+    scored = evaluate_job(job=job, confirmed_facts=[], confirmed_records=records)
+    assert "Matched confirmed candidate records: experience — School Cleaner" in scored.explanations
+
+    choice = choose_application_cv(
+        output_dir=tmp_path / "generated",
+        archived=[{
+            "path": str(template), "checksum": sha256(template.read_bytes()).hexdigest(),
+            "language": "en", "role_family": "cleaning_facilities", "text_check_score": 100,
+        }],
+        job=job,
+        candidate={"name": "Aino Example", "email": "aino@example.test"},
+        facts=[],
+        records=records,
+    )
+
+    assert choice.strategy == "reused"
+    assert choice.path == template
+    assert choice.score == 100
+
+
 def test_unconfirmed_cv_history_is_not_used_in_generated_cv(tmp_path: Path):
     from pypdf import PdfReader
 

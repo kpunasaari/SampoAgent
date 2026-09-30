@@ -10,6 +10,7 @@ from pypdf import PdfReader
 from sampoagent.candidate.service import read_cv_file
 from sampoagent.country_packs.finland.requirements import parse_requirements
 from sampoagent.cv.service import ROLE_FAMILIES, check_pdf_text, generate_cv_pdf
+from sampoagent.scoring.evidence import record_text_matches
 
 
 @dataclass(frozen=True)
@@ -113,14 +114,21 @@ def assess_cv_fit(
     parsed = parse_requirements(str(job.get("description", "")))
     requirements = parsed.hard_requirements + parsed.preferred_requirements
     relevant_facts = [str(fact["value"]) for fact in facts if bool(fact.get("confirmed")) and str(fact.get("value", "")).casefold() in description]
-    relevant_records = [
-        value
-        for record_type, items in records.items()
-        if record_type in {"experience", "education", "certificate", "licence", "language"}
-        for record in items
-        for value in (str(record.get("title") or ""), str(record.get("name") or ""), str(record.get("details") or ""))
-        if value.strip() and value.casefold() in description
-    ]
+    relevant_records: list[str] = []
+    for record_type, items in records.items():
+        if record_type not in {"experience", "education", "certificate", "licence", "language"}:
+            continue
+        for record in items:
+            values = [
+                value for value in (
+                    str(record.get("title") or ""),
+                    str(record.get("name") or ""),
+                    str(record.get("details") or ""),
+                )
+                if value.strip()
+            ]
+            if record_text_matches(" ".join(values), description):
+                relevant_records.extend(values)
     checks = list(dict.fromkeys([*requirements, *relevant_facts, *relevant_records]))
     if not checks:
         return 0, ("No supported job-specific evidence was found to assess reuse",)

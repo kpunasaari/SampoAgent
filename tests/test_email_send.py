@@ -225,6 +225,64 @@ def test_email_draft_requires_candidate_confirmation_of_posting_recipient(tmp_pa
     assert app.state.repository.email_outbox_for_application(application_id) is None
 
 
+def test_email_draft_route_does_not_echo_private_exception_text(tmp_path, monkeypatch):
+    from sampoagent.integrations.outbox import EmailOutboxError
+    import sampoagent.app.main as main
+
+    _app, client, application_id = _email_application(tmp_path, monkeypatch)
+    canary = "candidate@example.test +358401234567 access_token=synthetic-secret C:\\Users\\candidate\\cv.pdf"
+
+    def fail_with_private_details(*_args, **_kwargs):
+        raise EmailOutboxError(canary)
+
+    monkeypatch.setattr(main, "create_application_email_draft", fail_with_private_details)
+    response = client.post(
+        f"/email/applications/{application_id}/draft",
+        data={
+            "recipient": "recruitment@northstar.example",
+            "confirm_recipient_from_posting": "yes",
+            "csrf_token": _csrf_token(client.get("/applications")),
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    notice = parse_qs(urlsplit(response.headers["location"]).query)["notice"][0]
+    assert notice == "Could not prepare the email draft. Review the application, recipient, archived CV, and email connection."
+    assert "candidate@example.test" not in notice
+    assert "synthetic-secret" not in notice
+    assert "C:\\Users" not in notice
+
+
+def test_email_send_route_does_not_echo_private_exception_text(tmp_path, monkeypatch):
+    from sampoagent.integrations.outbox import EmailOutboxError
+    import sampoagent.app.main as main
+
+    _app, client, application_id = _email_application(tmp_path, monkeypatch)
+    canary = "candidate@example.test +358401234567 access_token=synthetic-secret C:\\Users\\candidate\\cv.pdf"
+
+    def fail_with_private_details(*_args, **_kwargs):
+        raise EmailOutboxError(canary)
+
+    monkeypatch.setattr(main, "send_approved_application_email", fail_with_private_details)
+    response = client.post(
+        f"/email/applications/{application_id}/send",
+        data={
+            "package_hash": "synthetic-package-hash",
+            "send_confirmation": "yes",
+            "csrf_token": _csrf_token(client.get("/applications")),
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    notice = parse_qs(urlsplit(response.headers["location"]).query)["notice"][0]
+    assert notice == "Email was not sent. Review the package, sender connection, automation settings, and application status before retrying."
+    assert "candidate@example.test" not in notice
+    assert "synthetic-secret" not in notice
+    assert "C:\\Users" not in notice
+
+
 def test_email_draft_form_is_clear_that_it_only_prepares_local_encrypted_content(tmp_path, monkeypatch):
     _configure_google(monkeypatch)
     app = create_app(database_path=tmp_path / "email-form.db")

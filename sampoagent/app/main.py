@@ -1731,8 +1731,8 @@ def create_app(
                     confirm_recipient_from_posting=confirm_recipient_from_posting == "yes",
                 )
                 notice = "Encrypted local email draft prepared. It has not been sent; review the exact package in the outbox."
-            except EmailOutboxError as exc:
-                notice = str(exc)
+            except EmailOutboxError:
+                notice = "Could not prepare the email draft. Review the application, recipient, archived CV, and email connection."
         return RedirectResponse("/applications?notice=" + quote(notice), status_code=303)
 
     @app.post("/email/applications/{application_id}/cancel")
@@ -1770,8 +1770,8 @@ def create_app(
                     notice = "Email outcome is uncertain. SampoAgent will not retry; check the Sent folder or contact the employer before taking further action."
                 else:
                     notice = "The provider rejected the email. This attempt will not be repeated automatically."
-            except EmailOutboxError as exc:
-                notice = str(exc)
+            except EmailOutboxError:
+                notice = "Email was not sent. Review the package, sender connection, automation settings, and application status before retrying."
         return RedirectResponse("/applications?notice=" + quote(notice), status_code=303)
 
     @app.post("/email/messages/{message_id}/confirm")

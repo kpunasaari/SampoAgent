@@ -292,3 +292,113 @@ def test_proxy_requires_its_ephemeral_credentials():
         assert "Proxy-Authenticate: Basic" in response
     finally:
         proxy.close()
+
+
+def test_chromium_proxy_failure_does_not_direct_connect_to_a_loopback_resolved_job_host(tmp_path):
+    pytest.importorskip("playwright.sync_api")
+    from datetime import datetime, timedelta, timezone
+    import ssl
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from threading import Thread
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+    from playwright.sync_api import Error as PlaywrightError, sync_playwright
+
+    host = "proxy-fallback.example.fi"
+    direct_requests = []
+
+    class LocalEmployer(BaseHTTPRequestHandler):
+        def do_GET(self):
+            direct_requests.append(self.path)
+            body = b"local synthetic employer"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, host)])
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(subject)
+        .public_key(private_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(days=1))
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName(host)]), critical=False)
+        .sign(private_key, hashes.SHA256())
+    )
+    certificate_path = tmp_path / "proxy-fallback.crt"
+    key_path = tmp_path / "proxy-fallback.key"
+    certificate_path.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(private_key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.TraditionalOpenSSL,
+        serialization.NoEncryption(),
+    ))
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), LocalEmployer)
+    server.daemon_threads = True
+    tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls.load_cert_chain(certificate_path, key_path)
+    server.socket = tls.wrap_socket(server.socket, server_side=True)
+    server_thread = Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
+    local_proxy = None
+    try:
+        job_url = f"https://{host}:{server.server_port}/apply"
+        proxy_resolutions = []
+        proxy_connections = []
+
+        def resolver(requested_host, port, *, type):
+            assert requested_host == host
+            proxy_resolutions.append((requested_host, port))
+            return [_answer("93.184.216.34", port)]
+
+        def connector(address, *, timeout):
+            proxy_connections.append(address)
+            raise OSError("synthetic upstream connection failure")
+
+        local_proxy = PinnedHttpsProxy(job_url, resolver=resolver, connector=connector)
+        local_proxy.start()
+        browser_proxy = local_proxy.playwright_proxy
+
+        with sync_playwright() as playwright:
+            chromium = playwright.chromium.launch(
+                headless=True,
+                args=[f"--host-resolver-rules=MAP {host} 127.0.0.1"],
+                proxy=browser_proxy,
+            )
+            try:
+                context = chromium.new_context(ignore_https_errors=True)
+                try:
+                    page = context.new_page()
+                    with pytest.raises(PlaywrightError):
+                        page.goto(job_url, timeout=5000)
+                    assert proxy_resolutions == [(host, server.server_port)]
+                    assert proxy_connections == [("93.184.216.34", server.server_port)]
+                    assert direct_requests == []
+                    local_proxy.close()
+                    with pytest.raises(PlaywrightError):
+                        page.goto(job_url + "?proxy-closed", timeout=5000)
+                    assert proxy_resolutions == [(host, server.server_port)]
+                    assert direct_requests == []
+                finally:
+                    context.close()
+            finally:
+                chromium.close()
+    finally:
+        if local_proxy is not None:
+            local_proxy.close()
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=2)

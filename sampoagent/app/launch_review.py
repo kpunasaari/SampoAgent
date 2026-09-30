@@ -198,7 +198,7 @@ def register_launch_review(
 <section><h3>Permission choices</h3><p>Review Everything prepares work only. Smart Approval prepares eligible applications and waits for your approval of each exact package. Full Autopilot can submit eligible applications without per-job prompts for at most 30 days, within the saved roles, preferences, confirmed facts and daily quota.</p>
 {disabled_note}
 <label><input type='checkbox' name='live_ack' value='yes'> I explicitly choose to enable the selected live mode now. I understand that this may allow external application activity within the limits above.</label>
-<label><input type='checkbox' name='autopilot_ack' value='yes'> For Full Autopilot only: I authorize submission without per-job prompts for up to 30 days using confirmed information and the exact scope and daily limit shown above. A current grant is shown above but must be actively selected again to renew it.</label>
+<label><input type='checkbox' name='autopilot_ack' value='yes'> For Full Autopilot only: I authorize submission without per-job prompts for up to 30 days using confirmed information and the exact scope and daily limit shown above. Next/Continue steps may save candidate information page by page; if a later step needs review, earlier entries may already be saved. A current grant is shown above but must be actively selected again to renew it.</label>
 <h4>Automatic stop rules</h4>{stop_rules}
 <p>CAPTCHA and challenges always wait for you one at a time. Full Autopilot stays off until its explicit grant is current. The worker runs only while the local SampoAgent process and interactive browser session are available.</p>
 <button name='action' value='save_review'>Save review only · keep Dry Run on</button>

@@ -40,6 +40,7 @@ _SAFE_ACTIVITY_ACTIONS = frozenset({
     "target_occupations_replaced",
 })
 _SAFE_ACTIVITY_DETAIL = "Activity details omitted to protect privacy."
+_AUTOPILOT_POLICY_VERSION = "stepwise-form-save-v1"
 
 
 def _split_candidate_values(value: str) -> list[str]:
@@ -188,6 +189,7 @@ class Repository:
             "ai_usage_mode": "minimal",
             "dry_run": "true",
             "autopilot_authorized": "false",
+            "autopilot_grant_policy_version": "",
             "autopilot_grant_fingerprint": "",
             "autopilot_grant_expires_at": "",
             "email_send_autopilot_authorized": "false",
@@ -1852,6 +1854,7 @@ class Repository:
         career_profiles = [dict(row) for row in self.connection.execute("SELECT name,enabled,notes FROM career_profiles ORDER BY id")]
         sources = [dict(row) for row in self.connection.execute("SELECT id,url,enabled,capability,terms_url,terms_reviewed,listing_selector FROM job_sources ORDER BY id")]
         snapshot = {
+            "policy_version": _AUTOPILOT_POLICY_VERSION,
             "profile": profile,
             "facts": facts,
             "records": records,
@@ -1897,12 +1900,16 @@ class Repository:
         fingerprint = self._autopilot_fingerprint()
         with self.connection:
             self.connection.execute("UPDATE settings SET value='true' WHERE key='autopilot_authorized'")
+            self.connection.execute("UPDATE settings SET value=? WHERE key='autopilot_grant_policy_version'", (_AUTOPILOT_POLICY_VERSION,))
             self.connection.execute("UPDATE settings SET value=? WHERE key='autopilot_grant_fingerprint'", (fingerprint,))
             self.connection.execute("UPDATE settings SET value=? WHERE key='autopilot_grant_expires_at'", (expires,))
             self.log("autopilot_granted", f"Expires {expires[:10]}; scoped to current profile and preferences")
 
     def autopilot_authorized(self) -> bool:
-        if self.setting("autopilot_authorized") != "true":
+        if (
+            self.setting("autopilot_authorized") != "true"
+            or self.setting("autopilot_grant_policy_version") != _AUTOPILOT_POLICY_VERSION
+        ):
             return False
         expires = self.setting("autopilot_grant_expires_at") or ""
         try:
@@ -1916,6 +1923,7 @@ class Repository:
     def revoke_autopilot(self, reason: str = "") -> None:
         active = self.setting("autopilot_authorized") == "true"
         self.connection.execute("UPDATE settings SET value='false' WHERE key='autopilot_authorized'")
+        self.connection.execute("UPDATE settings SET value='' WHERE key='autopilot_grant_policy_version'")
         self.connection.execute("UPDATE settings SET value='' WHERE key='autopilot_grant_fingerprint'")
         self.connection.execute("UPDATE settings SET value='' WHERE key='autopilot_grant_expires_at'")
         self.connection.execute("UPDATE settings SET value='false' WHERE key='email_send_autopilot_authorized'")

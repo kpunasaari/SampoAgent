@@ -56,6 +56,8 @@ class PlaywrightBrowserAgent:
         self._file_constraints: dict[str, tuple[tuple[str, ...], int | None]] = {}
         self._multiple_file_fields: set[str] = set()
         self._submit_buttons: list[Any] = []
+        self._next_buttons: list[Any] = []
+        self._expected_step_values: dict[str, str] = {}
 
     def start(self) -> None:
         if self._context is not None:
@@ -162,6 +164,7 @@ class PlaywrightBrowserAgent:
             raise ValueError("Only public HTTPS application pages without embedded credentials are supported")
         if self._restrict_cross_origin:
             self._allowed_origin = url
+        self._expected_step_values = {}
         page = self._require_page()
         if self._egress_proxy is not None:
             self._egress_proxy.set_allowed_origin(self._allowed_origin if self._restrict_cross_origin else None)
@@ -362,16 +365,24 @@ class PlaywrightBrowserAgent:
 
         buttons = page.locator("button, input[type='submit'], [role='button']")
         self._submit_buttons = []
+        self._next_buttons = []
         has_next_step = False
         for index in range(min(buttons.count(), 50)):
             button = buttons.nth(index)
             try:
                 name = (button.inner_text(timeout=500) or button.get_attribute("value") or button.get_attribute("aria-label") or "").strip()
-                if button.is_visible() and button.is_enabled():
+                belongs_to_single_form = button.evaluate("""el => {
+                  const contexts = Array.from(document.querySelectorAll('form,[role="form"]'));
+                  if (contexts.length !== 1) return false;
+                  const context = contexts[0];
+                  return el.closest('form,[role="form"]') === context || el.form === context;
+                }""")
+                if belongs_to_single_form and button.is_visible() and button.is_enabled():
                     if _SUBMIT_TEXT.search(name):
                         self._submit_buttons.append(button)
                     elif _NEXT_STEP_TEXT.search(name):
                         has_next_step = True
+                        self._next_buttons.append(button)
             except Exception:
                 continue
         try:
@@ -405,6 +416,7 @@ class PlaywrightBrowserAgent:
         return FormInspection(
             tuple(fields), captcha, authentication, self.validation_errors(), schema.signature,
             page.url, len(self._submit_buttons) == 1, current_values, uploaded_files, schema,
+            len(self._next_buttons) == 1,
         )
 
     def fill(self, field: str, value: str) -> None:
@@ -430,6 +442,9 @@ class PlaywrightBrowserAgent:
             raise ValueError("This control needs a dedicated, explicitly matched field mapping")
         else:
             locator.fill(value)
+        if not hasattr(self, "_expected_step_values"):
+            self._expected_step_values = {}
+        self._expected_step_values[field] = value
 
     def upload(self, field: str, path: str) -> None:
         locator = self._fields.get(field)
@@ -462,6 +477,57 @@ class PlaywrightBrowserAgent:
         except Exception:
             return ()
 
+    def advance_step(
+        self,
+        *,
+        expected_signature: str,
+        pre_click_check: Callable[[], bool] | None = None,
+    ) -> FormInspection:
+        """Advance one uniquely identified same-origin form page exactly once."""
+        page = self._require_page()
+        inspection = self.inspect_form()
+        schema = inspection.schema
+        if inspection.captcha_detected or inspection.authentication_required:
+            raise RuntimeError("The current employer page needs manual review")
+        if not is_safe_public_https_url(inspection.final_url or page.url):
+            raise RuntimeError("The current employer page is not a safe HTTPS origin")
+        if self._allowed_origin and not is_same_public_origin(self._allowed_origin, inspection.final_url or page.url):
+            raise RuntimeError("The current employer page changed origin")
+        if schema is None or not schema.single_form_context or not schema.has_next_step:
+            raise RuntimeError("No supported next application page was detected")
+        if schema.action_url and not is_same_public_origin(inspection.final_url or page.url, schema.action_url):
+            raise RuntimeError("The next form action changed origin")
+        if inspection.signature != expected_signature:
+            raise RuntimeError("The application page changed before Continue")
+        if len(self._next_buttons) != 1 or not inspection.next_step_control_ready:
+            raise RuntimeError("A unique Continue control was not detected")
+        mismatched_values = [
+            field_id
+            for field_id, expected in getattr(self, "_expected_step_values", {}).items()
+            if inspection.values.get(field_id) != expected
+        ]
+        if mismatched_values:
+            raise RuntimeError("A prepared application value changed before Continue")
+        if pre_click_check is not None:
+            try:
+                if not pre_click_check():
+                    raise RuntimeError("Application permission changed before Continue")
+            except Exception:
+                raise RuntimeError("Application permission changed before Continue") from None
+        previous_url = inspection.final_url or page.url
+        try:
+            self._next_buttons[0].click(timeout=5000)
+            page.wait_for_timeout(1000)
+            advanced = self.inspect_form()
+        except Exception:
+            # A Next click may have saved the current page. Never repeat it
+            # automatically if the resulting page cannot be inspected.
+            raise RuntimeError("The application step transition could not be verified") from None
+        if not is_same_public_origin(previous_url, advanced.final_url or page.url):
+            raise RuntimeError("The application step changed origin")
+        self._expected_step_values = {}
+        return advanced
+
     def submit(
         self,
         url: str,
@@ -480,6 +546,13 @@ class PlaywrightBrowserAgent:
             return SubmissionResult(False, True, "The employer form redirected to another origin; no submit action was taken", final_url=inspection.final_url or page.url)
         if expected_signature and inspection.signature != expected_signature:
             return SubmissionResult(False, True, "The application form changed after review; no submit action was taken", final_url=inspection.final_url or page.url)
+        mismatched_values = [
+            field_id
+            for field_id, expected in getattr(self, "_expected_step_values", {}).items()
+            if inspection.values.get(field_id) != expected
+        ]
+        if mismatched_values:
+            return SubmissionResult(False, True, "A prepared application value changed after review; no submit action was taken", final_url=inspection.final_url or page.url)
         if expected_uploads is not None:
             actual_uploads = {
                 field_id: {"name": file.get("name", ""), "sha256": file.get("sha256", "")}

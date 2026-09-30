@@ -56,6 +56,56 @@ class FakeBrowser:
         return self.result
 
 
+class MultiStepFakeBrowser(FakeBrowser):
+    def __init__(self, steps, *, result=None, on_advance=None, on_fill=None):
+        super().__init__(steps[0].fields, result=result, on_fill=on_fill)
+        self.steps = tuple(steps)
+        self.step_index = 0
+        self.advance_calls = 0
+        self.on_advance = on_advance
+
+    def inspect_form(self):
+        return replace(
+            self.steps[self.step_index],
+            values={**self.steps[self.step_index].values, **self.filled},
+            uploaded_files=dict(self.uploaded_files),
+        )
+
+    def validation_errors(self):
+        return self.steps[self.step_index].validation_errors
+
+    def advance_step(self, *, expected_signature, pre_click_check=None):
+        inspection = self.inspect_form()
+        if inspection.signature != expected_signature or not inspection.schema.has_next_step:
+            raise RuntimeError("step changed before Continue")
+        if pre_click_check is not None and not pre_click_check():
+            raise RuntimeError("authorization changed before Continue")
+        self.advance_calls += 1
+        if self.on_advance:
+            self.on_advance()
+        self.step_index += 1
+        return self.inspect_form()
+
+
+def _step_inspection(fields, number, *, has_next, page_url=None):
+    page_url = page_url or f"https://careers.northstar-logistics.fi/apply/step-{number}"
+    schema = FormSchema.build(
+        fields=tuple(fields),
+        page_url=page_url,
+        action_url="https://careers.northstar-logistics.fi/apply/continue",
+        navigation_checkpoint=f"{number} · Application details",
+        has_next_step=has_next,
+    )
+    return FormInspection(
+        tuple(fields),
+        signature=f"step-{number}",
+        final_url=page_url,
+        submit_control_ready=not has_next,
+        schema=schema,
+        next_step_control_ready=has_next,
+    )
+
+
 def _authorized_repository(tmp_path):
     repository = Repository(tmp_path / "automation.db")
     repository.initialize()
@@ -273,7 +323,225 @@ def test_runner_does_not_submit_optional_candidate_data_already_prefilled_by_emp
     repository.connection.close()
 
 
-def test_multistep_schema_pauses_before_any_candidate_value_is_entered(tmp_path):
+def test_full_autopilot_completes_same_origin_multistep_form_then_submits_once(tmp_path):
+    repository, application_id = _authorized_repository(tmp_path)
+    browser = MultiStepFakeBrowser((
+        _step_inspection([FormField("name", "Full name", True)], 1, has_next=True),
+        _step_inspection([FormField("email", "Email address", True, kind="email")], 2, has_next=False),
+    ))
+
+    result = process_application(repository, application_id, browser)
+
+    assert result == "APPLIED"
+    assert browser.filled == {"name": "Aino Example", "email": "aino@example.test"}
+    assert browser.advance_calls == 1
+    assert browser.submitted == 1
+    repository.connection.close()
+
+
+def test_smart_approval_multistep_form_waits_before_candidate_data_or_navigation(tmp_path):
+    repository, application_id = _authorized_repository(tmp_path)
+    repository.set_setting("application_mode", "smart_approval")
+    repository.revoke_autopilot("Switch to Smart Approval")
+    browser = MultiStepFakeBrowser((
+        _step_inspection([FormField("name", "Full name", True)], 1, has_next=True),
+        _step_inspection([FormField("email", "Email address", True, kind="email")], 2, has_next=False),
+    ))
+
+    result = process_application(repository, application_id, browser)
+
+    assert result == "NEEDS_USER"
+    assert browser.filled == {}
+    assert browser.advance_calls == 0
+    assert browser.submitted == 0
+    repository.connection.close()
+
+
+def test_multistep_high_risk_later_page_stops_before_filling_that_page(tmp_path):
+    repository, application_id = _authorized_repository(tmp_path)
+    browser = MultiStepFakeBrowser((
+        _step_inspection([FormField("name", "Full name", True)], 1, has_next=True),
+        _step_inspection([FormField("health", "Do you have a medical condition?", True)], 2, has_next=False),
+    ))
+
+    result = process_application(repository, application_id, browser)
+
+    assert result == "NEEDS_USER"
+    assert browser.filled == {"name": "Aino Example"}
+    assert browser.advance_calls == 1
+    assert browser.submitted == 0
+    assert "high-risk" in repository.application(application_id)["notes"].casefold()
+    repository.connection.close()
+
+
+def test_multistep_without_unique_next_control_stops_before_filling_page(tmp_path):
+    repository, application_id = _authorized_repository(tmp_path)
+    first_page = replace(
+        _step_inspection([FormField("name", "Full name", True)], 1, has_next=True),
+        next_step_control_ready=False,
+    )
+    browser = MultiStepFakeBrowser((
+        first_page,
+        _step_inspection([FormField("email", "Email address", True, kind="email")], 2, has_next=False),
+    ))
+
+    result = process_application(repository, application_id, browser)
+
+    assert result == "NEEDS_USER"
+    assert browser.filled == {}
+    assert browser.advance_calls == 0
+    assert browser.submitted == 0
+    repository.connection.close()
+
+
+def test_multistep_scope_change_before_continue_prevents_page_advance(tmp_path):
+    repository, application_id = _authorized_repository(tmp_path)
+
+    def revoke_during_fill():
+        repository.revoke_autopilot("Candidate revoked the grant during form preparation")
+
+    browser = MultiStepFakeBrowser((
+        _step_inspection([FormField("name", "Full name", True)], 1, has_next=True),
+        _step_inspection([FormField("email", "Email address", True, kind="email")], 2, has_next=False),
+    ), on_fill=revoke_during_fill)
+
+    result = process_application(repository, application_id, browser)
+
+    assert result == "NEEDS_USER"
+    assert browser.filled == {"name": "Aino Example"}
+    assert browser.advance_calls == 0
+    assert browser.submitted == 0
+    repository.connection.close()
+
+
+def test_multistep_changed_job_snapshot_prevents_saving_the_next_page(tmp_path):
+    repository, application_id = _authorized_repository(tmp_path)
+
+    def change_listing_during_fill():
+        repository.connection.execute("UPDATE jobs SET description=? WHERE id=1", ("Updated employer requirements",))
+        repository.connection.commit()
+
+    browser = MultiStepFakeBrowser((
+        _step_inspection([FormField("name", "Full name", True)], 1, has_next=True),
+        _step_inspection([FormField("email", "Email address", True, kind="email")], 2, has_next=False),
+    ), on_fill=change_listing_during_fill)
+
+    result = process_application(repository, application_id, browser)
+
+    assert result == "NEEDS_USER"
+    assert browser.filled == {"name": "Aino Example"}
+    assert browser.advance_calls == 0
+    assert browser.submitted == 0
+    repository.connection.close()
+
+
+def test_multistep_changed_job_snapshot_cancels_final_click_reservation(tmp_path):
+    repository, application_id = _authorized_repository(tmp_path)
+    browser = MultiStepFakeBrowser((
+        _step_inspection([FormField("name", "Full name", True)], 1, has_next=True),
+        _step_inspection([FormField("email", "Email address", True, kind="email")], 2, has_next=False),
+    ))
+
+    def change_listing_before_final_click():
+        repository.connection.execute("UPDATE jobs SET description=? WHERE id=1", ("Updated employer requirements",))
+        repository.connection.commit()
+
+    browser.on_pre_click = change_listing_before_final_click
+
+    result = process_application(repository, application_id, browser)
+
+    assert result == "NEEDS_USER"
+    assert browser.filled == {"name": "Aino Example", "email": "aino@example.test"}
+    assert browser.advance_calls == 1
+    assert browser.submitted == 0
+    assert repository.application(application_id)["queue_state"] == "WAITING_USER"
+    repository.connection.close()
+
+
+def test_multistep_later_captcha_is_queued_after_stopping_before_that_page(tmp_path):
+    repository, application_id = _authorized_repository(tmp_path)
+    captcha_page = replace(
+        _step_inspection([], 2, has_next=False),
+        captcha_detected=True,
+    )
+    browser = MultiStepFakeBrowser((
+        _step_inspection([FormField("name", "Full name", True)], 1, has_next=True),
+        captcha_page,
+    ))
+
+    result = process_application(repository, application_id, browser)
+
+    assert result == "CAPTCHA_HOLD"
+    assert browser.filled == {"name": "Aino Example"}
+    assert browser.advance_calls == 1
+    assert browser.submitted == 0
+    assert repository.captcha_tasks()[0]["application_id"] == application_id
+    repository.connection.close()
+
+
+def test_multistep_cv_upload_on_intermediate_page_holds_before_entering_page_data(tmp_path):
+    repository, application_id = _authorized_repository(tmp_path)
+    cv_path = tmp_path / "candidate.pdf"
+    cv_path.write_bytes(b"%PDF synthetic")
+    repository.update_application_cv_path(application_id, str(cv_path))
+    browser = MultiStepFakeBrowser((
+        _step_inspection(
+            [FormField("name", "Full name", True), FormField("resume", "Upload CV", True, kind="file")],
+            1,
+            has_next=True,
+        ),
+        _step_inspection([FormField("email", "Email address", True, kind="email")], 2, has_next=False),
+    ))
+
+    result = process_application(repository, application_id, browser)
+
+    assert result == "NEEDS_USER"
+    assert browser.filled == {}
+    assert browser.uploads == []
+    assert browser.advance_calls == 0
+    assert browser.submitted == 0
+    repository.connection.close()
+
+
+def test_multistep_cross_origin_result_is_held_before_filling_new_page(tmp_path):
+    repository, application_id = _authorized_repository(tmp_path)
+    browser = MultiStepFakeBrowser((
+        _step_inspection([FormField("name", "Full name", True)], 1, has_next=True),
+        _step_inspection(
+            [FormField("email", "Email address", True, kind="email")],
+            2,
+            has_next=False,
+            page_url="https://forms.other.fi/apply/step-2",
+        ),
+    ))
+
+    result = process_application(repository, application_id, browser)
+
+    assert result == "NEEDS_USER"
+    assert browser.filled == {"name": "Aino Example"}
+    assert browser.advance_calls == 1
+    assert browser.submitted == 0
+    repository.connection.close()
+
+
+def test_multistep_page_count_is_bounded_before_entering_eighth_next_step(tmp_path):
+    repository, application_id = _authorized_repository(tmp_path)
+    steps = tuple(
+        _step_inspection([FormField(f"unknown-{number}", f"Optional prompt {number}", False)], number, has_next=True)
+        for number in range(1, 9)
+    )
+    browser = MultiStepFakeBrowser(steps)
+
+    result = process_application(repository, application_id, browser)
+
+    assert result == "NEEDS_USER"
+    assert browser.filled == {}
+    assert browser.advance_calls == 7
+    assert browser.submitted == 0
+    repository.connection.close()
+
+
+def test_legacy_multistep_snapshot_still_holds_before_candidate_data(tmp_path):
     repository, application_id = _authorized_repository(tmp_path)
     browser = FakeBrowser(_basic_fields())
     browser.inspection = replace(
@@ -292,7 +560,7 @@ def test_multistep_schema_pauses_before_any_candidate_value_is_entered(tmp_path)
     assert result == "NEEDS_USER"
     assert browser.filled == {}
     assert browser.submitted == 0
-    assert "multi-step" in repository.application(application_id)["notes"]
+    assert "next/continue" in repository.application(application_id)["notes"].casefold()
     repository.connection.close()
 
 

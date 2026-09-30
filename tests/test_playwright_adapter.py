@@ -175,6 +175,228 @@ def test_form_schema_hash_binds_semantic_fields_origin_action_and_step_checkpoin
     assert base.schema_version == "1.1"
 
 
+def test_advance_step_refuses_a_changed_snapshot_or_revoked_permission():
+    fields = (FormField("name", "Full name", True),)
+    schema = FormSchema.build(
+        fields=fields,
+        page_url="https://careers.employer.fi/apply/step-1",
+        action_url="https://careers.employer.fi/apply/step-1",
+        navigation_checkpoint="1 of 2",
+        has_next_step=True,
+    )
+    inspection = FormInspection(
+        fields,
+        signature=schema.signature,
+        final_url=schema.page_url,
+        schema=schema,
+        next_step_control_ready=True,
+    )
+    agent, button = _agent_with_inspection(inspection)
+    agent._allowed_origin = "https://careers.employer.fi/apply/step-1"
+    agent._next_buttons = [button]
+
+    for expected_signature, pre_click_check in (("stale-signature", lambda: True), (schema.signature, lambda: False)):
+        with pytest.raises(RuntimeError):
+            agent.advance_step(expected_signature=expected_signature, pre_click_check=pre_click_check)
+
+    assert button.clicks == 0
+
+
+def test_advance_step_clicks_one_verified_continue_and_returns_same_origin_snapshot():
+    from playwright.sync_api import sync_playwright
+
+    state = {"step": 1}
+    page_html = {
+        1: """<!doctype html><form action='/apply/step-2'>
+          <label for='name'>Full name</label><input id='name' name='name'>
+          <button type='button' onclick=\"location.href='/apply/step-2'\">Continue</button>
+        </form>""",
+        2: """<!doctype html><form action='/apply/step-2'>
+          <label for='email'>Email address</label><input id='email' name='email' type='email'>
+          <button type='submit'>Apply</button>
+        </form>""",
+    }
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.route(
+            "https://careers.employer.fi/**",
+            lambda route: route.fulfill(
+                status=200,
+                body=page_html[2] if route.request.url.endswith("/apply/step-2") else page_html[1],
+                content_type="text/html",
+            ),
+        )
+        page.goto("https://careers.employer.fi/apply/step-1")
+        agent = object.__new__(PlaywrightBrowserAgent)
+        agent._context = browser
+        agent._page = page
+        agent._allowed_origin = "https://careers.employer.fi/apply/step-1"
+        agent._fields = {}
+        agent._kinds = {}
+        agent._radio_options = {}
+        agent._file_constraints = {}
+        agent._multiple_file_fields = set()
+        agent._submit_buttons = []
+        agent._next_buttons = []
+
+        first = agent.inspect_form()
+        assert first.schema is not None and first.schema.has_next_step
+        assert first.next_step_control_ready
+        second = agent.advance_step(
+            expected_signature=first.signature,
+            pre_click_check=lambda: True,
+        )
+
+        assert second.final_url == "https://careers.employer.fi/apply/step-2"
+        assert [field.field_id for field in second.fields] == ["email"]
+        assert second.submit_control_ready
+        assert not second.schema.has_next_step
+        browser.close()
+
+
+def test_advance_step_does_not_continue_if_a_prepared_value_changed_after_readback():
+    from playwright.sync_api import sync_playwright
+
+    page_html = {
+        1: """<!doctype html><form action='/apply/step-2'>
+          <label for='name'>Full name</label><input id='name' name='name'>
+          <button type='button' onclick=\"location.href='/apply/step-2'\">Continue</button>
+        </form>""",
+        2: """<!doctype html><form action='/apply/step-2'>
+          <label for='email'>Email address</label><input id='email' name='email' type='email'>
+          <button type='submit'>Apply</button>
+        </form>""",
+    }
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.route(
+            "https://careers.employer.fi/**",
+            lambda route: route.fulfill(
+                status=200,
+                body=page_html[2] if route.request.url.endswith("/apply/step-2") else page_html[1],
+                content_type="text/html",
+            ),
+        )
+        page.goto("https://careers.employer.fi/apply/step-1")
+        agent = object.__new__(PlaywrightBrowserAgent)
+        agent._context = browser
+        agent._page = page
+        agent._allowed_origin = "https://careers.employer.fi/apply/step-1"
+        agent._fields = {}
+        agent._kinds = {}
+        agent._radio_options = {}
+        agent._file_constraints = {}
+        agent._multiple_file_fields = set()
+        agent._submit_buttons = []
+        agent._next_buttons = []
+
+        first = agent.inspect_form()
+        agent.fill("name", "Aino Example")
+        page.locator("input[name='name']").evaluate("element => element.value = 'Different person'")
+
+        with pytest.raises(RuntimeError):
+            agent.advance_step(expected_signature=first.signature, pre_click_check=lambda: True)
+
+        assert page.url == "https://careers.employer.fi/apply/step-1"
+        browser.close()
+
+
+def test_inspection_marks_multiple_next_controls_as_ambiguous():
+    from playwright.sync_api import sync_playwright
+
+    page_html = """<!doctype html><form action='/apply/step-2'>
+      <label for='city'>City</label><input id='city' name='city'>
+      <button type='button'>Continue</button><button type='button'>Next step</button>
+    </form>"""
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.route("https://careers.employer.fi/**", lambda route: route.fulfill(status=200, body=page_html, content_type="text/html"))
+        page.goto("https://careers.employer.fi/apply/step-1")
+        agent = object.__new__(PlaywrightBrowserAgent)
+        agent._context = browser
+        agent._page = page
+        agent._fields = {}
+        agent._kinds = {}
+        agent._radio_options = {}
+        agent._file_constraints = {}
+        agent._multiple_file_fields = set()
+        agent._submit_buttons = []
+        agent._next_buttons = []
+
+        inspection = agent.inspect_form()
+
+        assert inspection.schema is not None and inspection.schema.has_next_step
+        assert inspection.next_step_control_ready is False
+        browser.close()
+
+
+def test_inspection_ignores_next_control_outside_the_application_form():
+    from playwright.sync_api import sync_playwright
+
+    page_html = """<!doctype html><form action='/apply'>
+      <label for='city'>City</label><input id='city' name='city'>
+    </form><button type='button'>Next</button>"""
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.route("https://careers.employer.fi/**", lambda route: route.fulfill(status=200, body=page_html, content_type="text/html"))
+        page.goto("https://careers.employer.fi/apply")
+        agent = object.__new__(PlaywrightBrowserAgent)
+        agent._context = browser
+        agent._page = page
+        agent._fields = {}
+        agent._kinds = {}
+        agent._radio_options = {}
+        agent._submit_buttons = []
+        agent._next_buttons = []
+
+        inspection = agent.inspect_form()
+
+        assert inspection.schema is not None
+        assert not inspection.schema.has_next_step
+        assert not inspection.next_step_control_ready
+        browser.close()
+
+
+def test_submit_does_not_click_if_a_prepared_value_changed_after_readback():
+    from playwright.sync_api import sync_playwright
+
+    page_html = """<!doctype html><form action='/apply'>
+      <label for='name'>Full name</label><input id='name' name='name'>
+      <button type='button' onclick=\"window.clickCount=(window.clickCount||0)+1\">Apply</button>
+    </form>"""
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.route("https://careers.employer.fi/**", lambda route: route.fulfill(status=200, body=page_html, content_type="text/html"))
+        page.goto("https://careers.employer.fi/apply")
+        agent = object.__new__(PlaywrightBrowserAgent)
+        agent._context = browser
+        agent._page = page
+        agent._allowed_origin = "https://careers.employer.fi/apply"
+        agent._fields = {}
+        agent._kinds = {}
+        agent._radio_options = {}
+        agent._file_constraints = {}
+        agent._multiple_file_fields = set()
+        agent._submit_buttons = []
+        agent._next_buttons = []
+
+        inspection = agent.inspect_form()
+        agent.fill("name", "Aino Example")
+        page.locator("input[name='name']").evaluate("element => element.value = 'Different person'")
+
+        agent.submit("https://careers.employer.fi/apply", expected_signature=inspection.signature)
+
+        assert page.evaluate("window.clickCount || 0") == 0
+        browser.close()
+
+
 def test_declared_file_type_and_size_are_included_in_the_schema_signature():
     common = {
         "fields": (FormField("cv", "Upload CV", True, "file", name="resume", accepted_types=("application/pdf", ".pdf"), max_file_size_bytes=5_000_000),),
@@ -315,7 +537,8 @@ def test_synthetic_finnish_swedish_english_ats_form_shape_matrix():
         assert [field[1:] for field in actual_fields] == [field[1:] for field in expected_fields]
         assert inspection.schema is not None
         assert not inspection.schema.single_form_context
-        assert inspection.schema.has_next_step
+        assert not inspection.schema.has_next_step
+        assert not inspection.next_step_control_ready
         assert len(cases) >= 20
         browser.close()
 
@@ -505,7 +728,8 @@ def test_inspector_extracts_aria_descriptions_radio_groups_file_constraints_and_
       <span id='phone-help'>Include a reachable number.</span>
       <label for='cv'>Upload CV</label><input id='cv' name='cv' type='file' accept='application/pdf,.pdf' data-max-file-size='100'>
       <label for='zero'>Zero-byte limit</label><input id='zero' name='zero' type='file' data-max-file-size='0'>
-    </div><button type='button'>Next</button>"""
+      <button type='button'>Next</button>
+    </div>"""
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
@@ -535,6 +759,7 @@ def test_inspector_extracts_aria_descriptions_radio_groups_file_constraints_and_
         assert inspection.schema is not None
         assert inspection.schema.action_url == "https://careers.employer.test/apply/submit"
         assert inspection.schema.has_next_step
+        assert inspection.next_step_control_ready
         assert inspection.schema.navigation_checkpoint == ""
         assert inspection.schema.single_form_context
 

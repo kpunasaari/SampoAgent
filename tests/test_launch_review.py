@@ -35,6 +35,7 @@ def test_guided_review_summarizes_profile_cv_scope_permissions_and_stop_rules(tm
     assert "Daily application limit: 0" in response.text
     assert "CAPTCHA" in response.text and "Unknown or conflicting required answer" in response.text
     assert "Full Autopilot authorization: Off" in response.text
+    assert "Next/Continue steps may save candidate information page by page" in response.text
     assert app.state.repository.setting("application_mode") == "review_everything"
     assert app.state.repository.setting("dry_run") == "true"
     assert app.state.repository.latest_discovery_run() is None

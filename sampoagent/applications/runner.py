@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 from uuid import uuid4
 
+from sampoagent.agents.browser import FormInspection
 from sampoagent.applications.field_resolver import FormField, resolve_application_fields
 from sampoagent.applications.urls import is_safe_public_https_url, is_same_public_origin
 from sampoagent.applications.workflow import ApplicationMode, can_submit, classify_question, record_submission_result
@@ -18,6 +19,7 @@ from sampoagent.jobs.service import job_snapshot_hash
 
 _CV_TERMS = ("cv", "resume", "curriculum vitae", "ansioluettelo", "attach resume")
 _MAX_VERIFICATION_AGE = timedelta(hours=24)
+_MAX_MULTISTEP_PAGES = 8
 
 
 def _active_verified_job(job: dict[str, object]) -> bool:
@@ -125,6 +127,378 @@ def _wait_for_user(repository: object, application_id: int, status: str, reason:
     return status
 
 
+def _process_multistep_application(
+    repository: object,
+    application_id: int,
+    browser: object,
+    preparation_token: str,
+    submission_context_fingerprint: str,
+    application_url: str,
+    expected_job_snapshot_hash: str,
+    initial_inspection: FormInspection,
+) -> str:
+    """Handle a narrow, Full-Autopilot-only multi-page application form."""
+    try:
+        mode = ApplicationMode(repository.setting("application_mode") or "review_everything")
+    except ValueError:
+        return _wait_for_user(repository, application_id, "NEEDS_USER", "The application mode changed; review the application controls.")
+    if mode != ApplicationMode.AUTOPILOT:
+        return _wait_for_user(
+            repository,
+            application_id,
+            "NEEDS_USER",
+            "A multi-step package cannot be reviewed as one complete unit; no candidate data was entered.",
+        )
+
+    pages: list[dict[str, object]] = []
+    answers: list[dict[str, object]] = []
+    seen_pages: set[tuple[str, str]] = set()
+    aggregate_risk = "LOW"
+    current = initial_inspection
+    final_signature = ""
+    final_uploads: dict[str, dict[str, str]] = {}
+    attachment = {"name": "", "sha256": ""}
+    cv_path = str((repository.application(application_id) or {}).get("cv_path") or "")
+    final_inspection = None
+
+    for step_number in range(1, _MAX_MULTISTEP_PAGES + 1):
+        if current.captcha_detected:
+            repository.hold_for_captcha(
+                application_id,
+                detected_url=current.final_url or application_url,
+                note="Browser detected an access challenge",
+            )
+            return "CAPTCHA_HOLD"
+        if current.authentication_required:
+            return _wait_for_user(repository, application_id, "NEEDS_AUTH", "Sign in to the employer site in the saved local browser session, then resume this application.")
+        if repository.automation_scope_fingerprint() != submission_context_fingerprint:
+            return _wait_for_user(repository, application_id, "NEEDS_USER", "Candidate information or application scope changed between application pages; review before resuming.")
+        if not is_same_public_origin(application_url, current.final_url):
+            return _wait_for_user(repository, application_id, "NEEDS_USER", "The application changed origin; no further form data was entered.")
+
+        schema = current.schema
+        if schema is None:
+            return _wait_for_user(repository, application_id, "NEEDS_USER", "The next application page has no verifiable form snapshot.")
+        if not schema.single_form_context:
+            return _wait_for_user(repository, application_id, "NEEDS_USER", "Multiple form contexts were detected; choose the intended application form manually.")
+        if schema.action_url and not is_same_public_origin(application_url, schema.action_url):
+            return _wait_for_user(repository, application_id, "NEEDS_USER", "The form action points to a different origin.")
+        if not current.fields:
+            return _wait_for_user(repository, application_id, "NEEDS_USER", "No accessible application fields were detected on a form page.")
+        page_key = (current.final_url, schema.signature)
+        if page_key in seen_pages:
+            return _wait_for_user(repository, application_id, "NEEDS_USER", "The application repeated a form page; review the employer flow manually.")
+        seen_pages.add(page_key)
+
+        application = repository.application(application_id)
+        current_job = repository.job(int(application["job_id"])) if application else None
+        if (
+            not application or not current_job
+            or application.get("status") != "QUEUED"
+            or application.get("queue_state") != "PREPARING"
+            or job_snapshot_hash(current_job) != expected_job_snapshot_hash
+            or not repository.owns_application_preparation(application_id, owner_token=preparation_token)
+        ):
+            return "BLOCKED"
+
+        file_fields = [field for field in current.fields if field.kind == "file"]
+        if schema.has_next_step:
+            if not current.next_step_control_ready:
+                return _wait_for_user(repository, application_id, "NEEDS_USER", "A unique Next/Continue control was not detected; no data was entered on this page.")
+            if step_number == _MAX_MULTISTEP_PAGES:
+                return _wait_for_user(repository, application_id, "NEEDS_USER", "The form exceeds the eight-page automation limit; review it manually.")
+            if file_fields:
+                return _wait_for_user(repository, application_id, "NEEDS_USER", "CV and attachments are supported only on the final form page; no data was entered on this page.")
+        elif not current.submit_control_ready:
+            return _wait_for_user(repository, application_id, "NEEDS_USER", "No unique final application submit control was detected.")
+
+        field_risks = {
+            field.field_id: classify_question(" ".join((field.group_label, field.label, field.description, field.name, field.autocomplete)))
+            for field in current.fields
+        }
+        high_risk = [field_id for field_id, risk in field_risks.items() if risk == "HIGH"]
+        if high_risk:
+            return _wait_for_user(repository, application_id, "NEEDS_USER", "High-risk or legal declaration requires your review: " + ", ".join(high_risk))
+        page_risk = "MEDIUM" if any(risk == "MEDIUM" for risk in field_risks.values()) else "LOW"
+        if page_risk == "MEDIUM":
+            aggregate_risk = "MEDIUM"
+
+        regular_fields = [field for field in current.fields if field.kind != "file"]
+        resolution = resolve_application_fields(
+            regular_fields,
+            profile=repository.profile() or {},
+            facts=repository.rows("facts"),
+            answers=repository.answers(),
+            records={kind: repository.candidate_records(kind) for kind in ("experience", "education", "certificate", "licence", "language", "availability", "preference")},
+            country=str(current_job.get("country") or ""),
+            employer=str(current_job.get("company") or ""),
+        )
+        if not resolution.ready:
+            identifiers = (*resolution.needs_input, *resolution.conflicts)
+            return _wait_for_user(repository, application_id, "NEEDS_USER", "Required or conflicting candidate answers need review: " + ", ".join(identifiers))
+
+        selected_upload = None
+        if file_fields:
+            if any(field.allows_multiple_files for field in file_fields):
+                return _wait_for_user(repository, application_id, "NEEDS_USER", "The form requests multiple attachments; review the complete attachment set manually.")
+            matching_uploads = [field for field in file_fields if any(term in field.label.casefold() for term in _CV_TERMS)]
+            required_file_fields = [field for field in file_fields if field.required]
+            if required_file_fields and (not cv_path or not Path(cv_path).is_file() or not matching_uploads):
+                return _wait_for_user(repository, application_id, "NEEDS_USER", "The final page requires a CV, but no uniquely identified upload field and readable archived CV are available.")
+            if len(matching_uploads) > 1 or any(field not in matching_uploads for field in required_file_fields):
+                return _wait_for_user(repository, application_id, "NEEDS_USER", "The final page has an unsupported attachment requirement; review it manually.")
+            if matching_uploads and cv_path and Path(cv_path).is_file():
+                selected_upload = matching_uploads[0]
+
+        prefilled_unresolved = []
+        for field in regular_fields:
+            existing_value = str(current.values.get(field.field_id, "")).strip()
+            if field.kind == "checkbox" and existing_value.casefold() in {"no", "false", "0", "unchecked"}:
+                continue
+            if existing_value and field.field_id not in resolution.values:
+                prefilled_unresolved.append(field.field_id)
+        if prefilled_unresolved:
+            return _wait_for_user(repository, application_id, "NEEDS_USER", "The employer page has unverified values in fields: " + ", ".join(prefilled_unresolved))
+
+        expected_uploads: dict[str, dict[str, str]] = {}
+        if selected_upload is not None:
+            try:
+                attachment = {
+                    "name": Path(cv_path).name,
+                    "sha256": sha256(Path(cv_path).read_bytes()).hexdigest(),
+                }
+            except OSError:
+                return _wait_for_user(repository, application_id, "NEEDS_USER", "The archived CV could not be re-verified before upload.")
+            expected_uploads[selected_upload.field_id] = dict(attachment)
+        actual_uploads = {
+            field_id: {"name": str(item.get("name", "")), "sha256": str(item.get("sha256", ""))}
+            for field_id, item in current.uploaded_files.items()
+        }
+        if actual_uploads and actual_uploads != expected_uploads:
+            return _wait_for_user(repository, application_id, "NEEDS_USER", "The employer page already contains an attachment outside the selected application package.")
+
+        page_policy = _policy_state(repository, application, current_job, risk=page_risk, answers_resolved=True, review_approved=True)
+        if page_policy == "PAUSED":
+            return "PAUSED"
+        if page_policy == "LIMIT_REACHED":
+            return page_policy
+        if page_policy:
+            return _wait_for_user(repository, application_id, "NEEDS_USER", "Full Autopilot authorization or job scope changed before this page; review before resuming.")
+
+        try:
+            for field in regular_fields:
+                if repository.automation_scope_fingerprint() != submission_context_fingerprint:
+                    return _wait_for_user(repository, application_id, "NEEDS_USER", "Candidate information changed before this page was filled.")
+                application = repository.application(application_id)
+                current_job = repository.job(int(application["job_id"])) if application else None
+                if (
+                    not application or not current_job
+                    or application.get("status") != "QUEUED"
+                    or application.get("queue_state") != "PREPARING"
+                    or job_snapshot_hash(current_job) != expected_job_snapshot_hash
+                    or not repository.owns_application_preparation(application_id, owner_token=preparation_token)
+                ):
+                    return "BLOCKED"
+                field_policy = _policy_state(repository, application, current_job, risk=page_risk, answers_resolved=True, review_approved=True)
+                if field_policy == "PAUSED":
+                    return "PAUSED"
+                if field_policy == "LIMIT_REACHED":
+                    return field_policy
+                if field_policy:
+                    return _wait_for_user(repository, application_id, "NEEDS_USER", "Full Autopilot authorization or job scope changed before a field was filled.")
+                value = resolution.values.get(field.field_id)
+                if value is not None:
+                    browser.fill(field.field_id, value)
+            if selected_upload is not None:
+                if repository.automation_scope_fingerprint() != submission_context_fingerprint:
+                    return _wait_for_user(repository, application_id, "NEEDS_USER", "Candidate information changed before the CV upload.")
+                application = repository.application(application_id)
+                current_job = repository.job(int(application["job_id"])) if application else None
+                if (
+                    not application or not current_job
+                    or application.get("status") != "QUEUED"
+                    or application.get("queue_state") != "PREPARING"
+                    or job_snapshot_hash(current_job) != expected_job_snapshot_hash
+                    or not repository.owns_application_preparation(application_id, owner_token=preparation_token)
+                ):
+                    return "BLOCKED"
+                upload_policy = _policy_state(repository, application, current_job, risk=page_risk, answers_resolved=True, review_approved=True)
+                if upload_policy == "PAUSED":
+                    return "PAUSED"
+                if upload_policy == "LIMIT_REACHED":
+                    return upload_policy
+                if upload_policy:
+                    return _wait_for_user(repository, application_id, "NEEDS_USER", "Full Autopilot authorization or job scope changed before the CV upload.")
+                browser.upload(selected_upload.field_id, cv_path)
+            errors = tuple(browser.validation_errors())
+            after_fill = browser.inspect_form()
+        except Exception:
+            return _wait_for_user(repository, application_id, "NEEDS_USER", "The form changed or a field could not be safely filled.")
+
+        if after_fill.captcha_detected:
+            repository.hold_for_captcha(application_id, detected_url=after_fill.final_url or application_url, note="Access challenge appeared while preparing the form")
+            return "CAPTCHA_HOLD"
+        if after_fill.authentication_required:
+            return _wait_for_user(repository, application_id, "NEEDS_AUTH", "The employer session expired while preparing the form.")
+        if not is_same_public_origin(application_url, after_fill.final_url):
+            return _wait_for_user(repository, application_id, "NEEDS_USER", "The form redirected to an unexpected destination; no final application was submitted.")
+        if errors or after_fill.validation_errors:
+            return _wait_for_user(repository, application_id, "NEEDS_USER", "The employer form rejected one or more prepared values.")
+        mismatched = [field_id for field_id, expected in resolution.values.items() if after_fill.values.get(field_id) != expected]
+        if mismatched:
+            return _wait_for_user(repository, application_id, "NEEDS_USER", "The browser could not verify prepared values in fields: " + ", ".join(mismatched))
+        if after_fill.schema is None or after_fill.schema.signature != schema.signature:
+            return _wait_for_user(repository, application_id, "NEEDS_USER", "The form changed after values were entered; review the new questions.")
+        if after_fill.schema.has_next_step != schema.has_next_step:
+            return _wait_for_user(repository, application_id, "NEEDS_USER", "The form navigation changed after values were entered.")
+        if not schema.has_next_step and not after_fill.submit_control_ready:
+            return _wait_for_user(repository, application_id, "NEEDS_USER", "The final application button changed after values were entered.")
+        if selected_upload is not None:
+            actual = after_fill.uploaded_files.get(selected_upload.field_id, {})
+            identity = {"name": actual.get("name", ""), "sha256": actual.get("sha256", "")}
+            if identity != expected_uploads[selected_upload.field_id]:
+                return _wait_for_user(repository, application_id, "NEEDS_USER", "The selected CV attachment could not be verified.")
+
+        pages.append({
+            "signature": schema.signature,
+            "checkpoint": schema.navigation_checkpoint,
+            "fields": [
+                {"id": field.field_id, "label": field.label, "required": field.required, "kind": field.kind}
+                for field in current.fields
+            ],
+        })
+        for field in regular_fields:
+            answers.append({
+                "step": step_number,
+                "field_id": field.field_id,
+                "label": field.label,
+                "value": resolution.values.get(field.field_id),
+                "source": resolution.sources.get(field.field_id, "not answered"),
+            })
+
+        final_inspection = after_fill
+        final_signature = after_fill.signature or schema.signature
+        final_uploads = expected_uploads
+        if not schema.has_next_step:
+            break
+
+        transition_block: list[str] = []
+
+        def recheck_before_advance() -> bool:
+            current_application = repository.application(application_id)
+            current_job = repository.job(int(current_application["job_id"])) if current_application else None
+            if (
+                repository.automation_scope_fingerprint() != submission_context_fingerprint
+                or not current_application
+                or current_application.get("status") != "QUEUED"
+                or current_application.get("queue_state") != "PREPARING"
+                or not current_job
+                or job_snapshot_hash(current_job) != expected_job_snapshot_hash
+                or not repository.owns_application_preparation(application_id, owner_token=preparation_token)
+            ):
+                transition_block.append("BLOCKED")
+                return False
+            policy = _policy_state(repository, current_application, current_job, risk=aggregate_risk, answers_resolved=True, review_approved=True)
+            if policy:
+                transition_block.append(policy)
+                return False
+            return True
+
+        try:
+            current = browser.advance_step(expected_signature=final_signature, pre_click_check=recheck_before_advance)
+        except Exception:
+            if transition_block and transition_block[0] == "PAUSED":
+                return "PAUSED"
+            if transition_block and transition_block[0] == "LIMIT_REACHED":
+                return "LIMIT_REACHED"
+            return _wait_for_user(repository, application_id, "NEEDS_USER", "The application step transition could not be verified; review the current employer page before resuming.")
+
+    if final_inspection is None or not final_signature:
+        return _wait_for_user(repository, application_id, "NEEDS_USER", "The application did not reach a verifiable final form page.")
+    if final_inspection.schema and final_inspection.schema.has_next_step:
+        return _wait_for_user(repository, application_id, "NEEDS_USER", "The form exceeds the eight-page automation limit; review it manually.")
+
+    application = repository.application(application_id)
+    current_job = repository.job(int(application["job_id"])) if application else None
+    if (
+        not application or not current_job
+        or application.get("status") != "QUEUED"
+        or application.get("queue_state") != "PREPARING"
+        or job_snapshot_hash(current_job) != expected_job_snapshot_hash
+        or not repository.owns_application_preparation(application_id, owner_token=preparation_token)
+    ):
+        return "BLOCKED"
+    if repository.automation_scope_fingerprint() != submission_context_fingerprint:
+        return _wait_for_user(repository, application_id, "NEEDS_USER", "Candidate information or application scope changed before final submission.")
+    manifest_signature = sha256(json.dumps(pages, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+    package = {
+        "application": application_id,
+        "job": {key: current_job.get(key) for key in ("id", "title", "company", "application_url", "deadline", "verification_state", "verified_at")},
+        "form": {"signature": manifest_signature, "pages": pages},
+        "answers": answers,
+        "cv": attachment,
+    }
+    package_hash = sha256(json.dumps(package, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+    final_policy = _policy_state(repository, application, current_job, risk=aggregate_risk, answers_resolved=True, review_approved=True)
+    if final_policy == "PAUSED":
+        return "PAUSED"
+    if final_policy:
+        return final_policy if final_policy == "LIMIT_REACHED" else _wait_for_user(repository, application_id, "NEEDS_USER", "Full Autopilot authorization changed before final submission.")
+    attempt_id = repository.reserve_submission_attempt(
+        application_id,
+        daily_limit=int(repository.setting("daily_limit") or "0"),
+        package_hash=package_hash,
+        preparation_token=preparation_token,
+    )
+    if attempt_id is None:
+        return "LIMIT_REACHED" if repository.submissions_reserved_today() >= int(repository.setting("daily_limit") or "0") else "NOT_READY"
+    pre_click_block: list[str] = []
+
+    def recheck_before_final_click() -> bool:
+        current_application = repository.application(application_id)
+        latest_job = repository.job(int(current_application["job_id"])) if current_application else None
+        if (
+            not current_application or not latest_job
+            or int(current_application.get("job_id", -1)) != int(application["job_id"])
+            or job_snapshot_hash(latest_job) != expected_job_snapshot_hash
+            or current_application.get("status") != "SUBMITTING"
+            or current_application.get("queue_state") != "SUBMITTING"
+            or not repository.submission_attempt_is_active(application_id, attempt_id, package_hash=package_hash)
+            or repository.automation_scope_fingerprint() != submission_context_fingerprint
+        ):
+            pre_click_block.append("BLOCKED")
+            return False
+        state = _policy_state(repository, current_application, latest_job, risk=aggregate_risk, answers_resolved=True, review_approved=True, exclude_current_reservation=True)
+        if state:
+            pre_click_block.append(state)
+            return False
+        return True
+
+    try:
+        result = browser.submit(
+            application_url,
+            expected_signature=final_signature,
+            expected_uploads=final_uploads,
+            pre_click_check=recheck_before_final_click,
+        )
+        if pre_click_block:
+            if not repository.cancel_unsubmitted_attempt(application_id, message="Authorization or pause state changed before the final click"):
+                raise RuntimeError("A pre-click cancellation could not be confirmed")
+            if pre_click_block[0] == "PAUSED":
+                return "PAUSED"
+            return _wait_for_user(repository, application_id, "NEEDS_USER", "The application authorization changed before final submission; review the controls.")
+        if not result.submitted and not result.outcome_unknown and not result.captcha_detected and result.manual_action_required:
+            if repository.cancel_unsubmitted_attempt(application_id, message="The browser stopped before clicking Submit; no external submission was made"):
+                return _wait_for_user(repository, application_id, "NEEDS_USER", "The browser stopped before final submission; review the form and resume when ready.")
+        if result.final_url and not is_same_public_origin(application_url, result.final_url):
+            raise ValueError("Final confirmation URL changed origin")
+        return record_submission_result(repository, application_id, result)
+    except Exception:
+        repository.update_application_status(application_id, "SUBMITTED_UNVERIFIED", "Submission was attempted, but the result could not be safely recorded; automatic retry is disabled.", queue_state="DO_NOT_RETRY")
+        repository.finish_submission_attempt(application_id, state="UNKNOWN", message="Submission result could not be safely recorded")
+        return "SUBMITTED_UNVERIFIED"
+
+
 def process_application(repository: object, application_id: int, browser: object) -> str:
     """Prepare, revalidate and make at most one authorized final-submit click.
 
@@ -199,7 +573,16 @@ def _process_claimed_application(repository: object, application_id: int, browse
     if schema and schema.action_url and not is_same_public_origin(application_url, schema.action_url):
         return _wait_for_user(repository, application_id, "NEEDS_USER", "The form submission action points to a different origin; no candidate data was entered.")
     if schema and schema.has_next_step:
-        return _wait_for_user(repository, application_id, "NEEDS_USER", "This is a multi-step form that needs page-by-page review; no candidate data was entered.")
+        return _process_multistep_application(
+            repository,
+            application_id,
+            browser,
+            preparation_token,
+            submission_context_fingerprint,
+            application_url,
+            job_snapshot_hash(job),
+            inspection,
+        )
     if not inspection.submit_control_ready:
         return _wait_for_user(repository, application_id, "NEEDS_USER", "No unique application submit control was detected.")
     if not inspection.fields:

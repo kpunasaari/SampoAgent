@@ -128,7 +128,8 @@
 **Interfaces:** `FormSchema` semantic version, `FormField` identity/source/options, navigation checkpoint ve page origin taşır; ATS adapter'ı unsupported field için fail-closed döner.
 
 - [x] Semantic `FormSchema` version, page origin/action, field identity/source/options, checkpoint ve schema hash'i ekle. Playwright; label, aria-labelledby, fieldset legend, name, autocomplete ve ilişkili açıklamayı yakalar; etiketsiz required alan tahminiyle doldurulmaz.
-- [x] Multistep/checkpoint ve çoklu form context'i tespit et; her adımı henüz işleyemediği için worker aday verisi girmeden manuel incelemeye bırakır. Gerçek çok-adım navigasyon ve sayfa bazlı dry-run snapshot desteği açık iştir.
+- [x] Multistep/checkpoint ve çoklu form context'i tespit et; çoklu form context'i desteklenmez ve aday verisi girmeden manuel incelemeye bırakılır.
+- [x] Yalnız Full Autopilot'ta aynı-origin, tek form/tek Next kontrolü, en fazla 8 benzersiz sayfa; sayfa-başına çözümleme/readback/policy kontrolü; ara sayfada upload yok; final sayfada tanımlı CV upload; Smart Approval/Dry Run ilk aday verisi öncesi bekler. Next ile ara kayıt olabileceğini Autopilot izninde açıkla ve final Submit'i tek kez yap; form imzası yanında prepared values da her geçiş/final click öncesi tekrar doğrulanır.
 - [x] Radio grupları tek prompt ve seçenek kümesi olarak çıkarılır; teyitli cevap tek seçeneğe tam eşleşirse doldurulur. Checkbox grupları, consent, assessment ve declaration otomatik doldurulmaz; policy'ye bırakılır.
 - [x] CV upload alanında exact CV role, formda açıklanmış MIME türü ve size limiti kontrol edilir; CV dışı ek tahmin edilmez. Bu limitler form schema imzasına dahildir.
 - [x] Employer account sayfasında başlangıçta dolu ama aday bankasında kaynağı olmayan optional alanları ve seçili ekleri kullanıcı görmeden ezme/gönderme; final adapter click'inden hemen önce pause/izin/kota/ilan politikasını tekrarla.

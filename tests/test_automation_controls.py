@@ -187,7 +187,9 @@ def test_full_autopilot_requires_explicit_authorization_and_daily_limit(tmp_path
 
     app = create_app(database_path=str(tmp_path / "settings.db"), demo_data=True)
     client = TestClient(app)
-    assert "explicitly select at least one target occupation" in client.get("/settings").text
+    settings_page = client.get("/settings").text
+    assert "explicitly select at least one target occupation" in settings_page
+    assert "Next/Continue steps may save candidate information page by page" in settings_page
     payload = {"application_mode": "autopilot", "daily_limit": "4", "dry_run": "false", "ai_usage_mode": "minimal"}
     client.post("/settings", data=payload)
     assert app.state.repository.setting("dry_run") == "true"
@@ -198,6 +200,22 @@ def test_full_autopilot_requires_explicit_authorization_and_daily_limit(tmp_path
     client.post("/settings", data=payload)
     assert app.state.repository.setting("dry_run") == "true"
     assert app.state.repository.setting("autopilot_authorized") == "false"
+
+
+def test_legacy_autopilot_grant_is_invalidated_when_stepwise_save_consent_changes(tmp_path):
+    repository = Repository(tmp_path / "legacy-grant.db")
+    repository.initialize()
+    repository.load_demo()
+    repository.add_target_occupation("Warehouse Worker", "Varastotyöntekijä")
+    repository.set_setting("application_mode", "autopilot")
+    repository.set_setting("daily_limit", "2")
+    repository.set_setting("dry_run", "false")
+    repository.grant_autopilot()
+    assert repository.autopilot_authorized() is True
+    repository.set_setting("autopilot_grant_policy_version", "legacy")
+
+    assert repository.autopilot_authorized() is False
+    repository.connection.close()
 
 
 def test_autopilot_grant_requires_a_user_selected_target_or_explicit_search_scope():

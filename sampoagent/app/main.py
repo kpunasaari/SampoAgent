@@ -34,7 +34,7 @@ from sampoagent.integrations.outbox import EmailOutboxError, create_application_
 from sampoagent.jobs.sources import source_health
 from sampoagent.scoring.engine import DimensionConfig
 from sampoagent.scoring.job_score import dump_configs, evaluate_job, load_configs
-from sampoagent.cv.service import ROLE_FAMILIES, generate_cv_pdf, validate_ats_pdf
+from sampoagent.cv.service import ROLE_FAMILIES, check_pdf_text, generate_cv_pdf
 from sampoagent.cv.ocr import OCRProviderUnavailable
 
 
@@ -869,7 +869,7 @@ def create_app(
         repository.archive_cv(
             path=selected_cv, checksum=choice.checksum, language=choice.language,
             role_family=choice.role_family, source_job_id=job_id, fit_score=choice.score,
-            ats_score=choice.ats_score if choice.text_check_performed else None,
+            text_check_score=choice.text_check_score if choice.text_check_performed else None,
             strategy=choice.strategy,
         )
         try:
@@ -1804,7 +1804,7 @@ def create_app(
         def cv_text_check_label(item: dict[str, object]) -> str:
             if not bool(item.get("text_check_performed")):
                 return "Not checked"
-            return f"{int(item.get('ats_score') or 0)}%"
+            return f"{int(item.get('text_check_score') or 0)}%"
 
         archive_rows = "".join(f"<tr><td><a href='/cvs/archive/{item['id']}'>{escape(Path(str(item['path'])).name)}</a></td><td>{escape(str(item['strategy']))}</td><td>{escape(str(item['role_family']))}</td><td>{escape(str(item['language']))}</td><td>{item['fit_score']}%</td><td>{cv_text_check_label(item)}</td><td>{escape(str(item['checksum'])[:12])}</td></tr>" for item in repository.cv_archives()) or "<tr><td colspan='7'>No CVs archived yet.</td></tr>"
         notice_html = f"<p class='notice' role='status'>{escape(notice)}</p>" if notice else ""
@@ -1902,10 +1902,10 @@ def create_app(
             required.append(profile["email"])
         required.extend(str(fact["value"]) for fact in facts if fact.get("confirmed") and fact.get("type") in {"skill", "language"})
         required.extend(str(record.get("title") or record.get("name") or "") for group in records.values() for record in group if record.get("title") or record.get("name"))
-        report = validate_ats_pdf(path, required=required)
+        report = check_pdf_text(path, required=required)
         checksum = sha256(path.read_bytes()).hexdigest()
         repository.add_document(kind="generated_cv", path=str(path), checksum=checksum)
-        repository.archive_cv(path=str(path), checksum=checksum, language=language, role_family=role_family, source_job_id=job_id, fit_score=0, ats_score=report.score, strategy="generated")
+        repository.archive_cv(path=str(path), checksum=checksum, language=language, role_family=role_family, source_job_id=job_id, fit_score=0, text_check_score=report.score, strategy="generated")
         download_path = "/cvs/generated/" + quote(path.name)
         return _page("CV Generated", f"<section><p>Generated: <a href='{escape(download_path)}'>{escape(path.name)}</a></p><p>CV text check: {report.score}% expected confirmed candidate text was found in the parsed PDF. This is not an ATS compatibility or hiring-success score.</p></section>", path="/cvs")
 

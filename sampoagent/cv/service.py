@@ -14,11 +14,16 @@ from reportlab.platypus import HRFlowable, KeepTogether, Paragraph, SimpleDocTem
 
 
 @dataclass(frozen=True)
-class AtsReport:
+class PDFTextCheck:
     passed: bool
     score: int
     text: str
     missing: list[str]
+
+
+# Kept as an import-compatibility alias for local callers from earlier versions.
+# The result measures parsed-PDF text presence only, not ATS compatibility.
+AtsReport = PDFTextCheck
 
 
 ROLE_FAMILIES = ("universal", "entry_level", "cleaning_facilities", "hotel_hospitality", "restaurant_kitchen", "retail", "customer_service", "warehouse_logistics", "transport_delivery", "manufacturing_production", "construction", "maintenance_technical", "office_administration", "finance_accounting", "sales", "marketing_communications", "it_software", "engineering_technical", "healthcare", "social_care", "education_childcare", "public_sector", "security", "agriculture_outdoor", "creative_media")
@@ -209,8 +214,14 @@ def generate_cv_pdf(
     return path
 
 
-def validate_ats_pdf(path: Path, *, required: list[str]) -> AtsReport:
+def check_pdf_text(path: Path, *, required: list[str]) -> PDFTextCheck:
+    """Check whether expected phrases appear in text parsed from a PDF."""
     text = "\n".join(page.extract_text() or "" for page in PdfReader(str(path)).pages)
     missing = [item for item in required if item not in text]
     score = round((len(required) - len(missing)) / len(required) * 100) if required else 100
-    return AtsReport(not missing, score, text, missing)
+    return PDFTextCheck(not missing, score, text, missing)
+
+
+def validate_ats_pdf(path: Path, *, required: list[str]) -> PDFTextCheck:
+    """Compatibility wrapper; this is a PDF text check, not an ATS score."""
+    return check_pdf_text(path, required=required)

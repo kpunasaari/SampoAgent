@@ -1,8 +1,8 @@
 # SampoAgent — Open-Source Job Application & Career Agent
 
-SampoAgent is an open-source AI job application tool and career agent that discovers relevant jobs, matches them to your skills and experience, tailors ATS-friendly CVs, assists with application forms, and tracks job applications.
+SampoAgent is an open-source AI job application tool and career agent that discovers relevant jobs, matches them to your skills and experience, tailors confirmed-fact CVs to vacancies, assists with application forms, and tracks job applications.
 
-It is a local-first job search agent, ATS CV/resume tailoring tool, job application tracker, and safe foundation for job application assistance. It is not a service that invents qualifications, bypasses CAPTCHAs, or promises hiring outcomes.
+It is a local-first job search agent, CV/resume tailoring tool, job application tracker, and safe foundation for job application assistance. It is not a service that invents qualifications, bypasses CAPTCHAs, or promises hiring outcomes.
 
 SampoAgent is designed for any candidate. Finland and Finnish/English workflows are the initial focus; country-specific job sources and rules are modular. The repository includes a reusable Codex skill named **SampoAgent** and smaller workflow skills under `.agents/skills/`.
 

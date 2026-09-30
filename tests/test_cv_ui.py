@@ -48,7 +48,7 @@ def test_cv_archive_explains_text_check_without_claiming_ats_or_hiring_success(t
     app.state.repository.archive_cv(
         path=str(path), checksum=sha256(path.read_bytes()).hexdigest(), language="en",
         role_family="warehouse_logistics", source_job_id=1, fit_score=91,
-        ats_score=82, strategy="generated",
+        text_check_score=82, strategy="generated",
     )
     untested_path = tmp_path / "uploaded-cv.pdf"
     untested_path.write_bytes(b"synthetic uploaded CV placeholder")
@@ -62,7 +62,7 @@ def test_cv_archive_explains_text_check_without_claiming_ats_or_hiring_success(t
     app.state.repository.archive_cv(
         path=str(checked_zero_path), checksum=sha256(checked_zero_path.read_bytes()).hexdigest(),
         language="en", role_family="warehouse_logistics", source_job_id=1,
-        fit_score=91, ats_score=0, strategy="generated",
+        fit_score=91, text_check_score=0, strategy="generated",
     )
 
     response = TestClient(app).get("/cvs")

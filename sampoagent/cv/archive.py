@@ -9,7 +9,7 @@ from pypdf import PdfReader
 
 from sampoagent.candidate.service import read_cv_file
 from sampoagent.country_packs.finland.requirements import parse_requirements
-from sampoagent.cv.service import ROLE_FAMILIES, generate_cv_pdf, validate_ats_pdf
+from sampoagent.cv.service import ROLE_FAMILIES, check_pdf_text, generate_cv_pdf
 
 
 @dataclass(frozen=True)
@@ -19,7 +19,7 @@ class CVChoice:
     role_family: str
     language: str
     score: int
-    ats_score: int
+    text_check_score: int
     text_check_performed: bool
     reasons: tuple[str, ...]
     checksum: str
@@ -154,7 +154,8 @@ def choose_application_cv(*, output_dir: Path, archived: list[dict[str, object]]
             if adjustment:
                 choice_reasons = (*reasons, f"Confirmed application outcomes influenced this archived CV choice ({adjustment:+d})")
             reusable.append((score + adjustment, score, -index, CVChoice(
-                path, "reused", family, language, score, int(item.get("ats_score", 0)),
+                path, "reused", family, language, score,
+                int(item.get("text_check_score", item.get("ats_score", 0))),
                 bool(item.get("text_check_performed")), choice_reasons, checksum,
             )))
 
@@ -188,9 +189,9 @@ def choose_application_cv(*, output_dir: Path, archived: list[dict[str, object]]
         required.append(candidate["email"])
     required.extend(str(fact["value"]) for fact in usable_facts if fact.get("type") in {"skill", "language", "certificate", "licence"})
     required.extend(str(record.get("title") or record.get("name") or "") for group in usable_records.values() for record in group if record.get("title") or record.get("name"))
-    report = validate_ats_pdf(path, required=required)
+    report = check_pdf_text(path, required=required)
     if not report.passed:
-        raise ValueError("Generated CV failed its ATS text re-parse")
+        raise ValueError("Generated CV failed its PDF text-presence check")
     checksum = sha256(path.read_bytes()).hexdigest()
     match_score, match_reasons = assess_cv_fit(
         report.text, job=job, facts=usable_facts, records=usable_records, role_family=family,

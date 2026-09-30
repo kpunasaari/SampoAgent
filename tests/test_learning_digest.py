@@ -15,7 +15,7 @@ def _seed_learning_history(repository, tmp_path):
     checksum = sha256(cv_path.read_bytes()).hexdigest()
     repository.archive_cv(
         path=str(cv_path), checksum=checksum, language="en", role_family="warehouse_logistics",
-        source_job_id=None, fit_score=93, ats_score=100, strategy="generated",
+        source_job_id=None, fit_score=93, text_check_score=100, strategy="generated",
     )
     repository.add_document(kind="application_cv", path=str(cv_path), checksum=checksum)
     outcomes = ("INTERVIEW", "ASSESSMENT", "OFFER", "REJECTED", "REJECTED")

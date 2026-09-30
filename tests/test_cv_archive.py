@@ -144,7 +144,7 @@ def test_archived_cv_is_not_reused_after_its_bytes_change(tmp_path: Path):
         output_dir=tmp_path / "generated",
         archived=[{
             "path": str(template), "checksum": original_checksum,
-            "language": "en", "role_family": "warehouse_logistics", "ats_score": 100,
+            "language": "en", "role_family": "warehouse_logistics", "text_check_score": 100,
         }],
         job={"id": 19, "title": "Warehouse Worker", "description": "Forklift operation preferred.", "language": "en"},
         candidate={"name": "Aino Example", "email": "aino@example.test"},
@@ -168,7 +168,7 @@ def test_user_selected_archived_cv_also_requires_its_original_checksum(tmp_path:
     repository.archive_cv(
         path=str(cv), checksum=sha256(cv.read_bytes()).hexdigest(), language="en",
         role_family="warehouse_logistics", source_job_id=None, fit_score=90,
-        ats_score=100, strategy="uploaded",
+        text_check_score=100, strategy="uploaded",
     )
     cv.write_bytes(b"modified after review")
 
@@ -208,6 +208,48 @@ def test_legacy_cv_archive_migration_marks_old_text_scores_unchecked(tmp_path: P
     repository.connection.close()
 
 
+def test_cv_archive_renames_checked_legacy_score_and_accepts_new_text_check_name(tmp_path: Path):
+    import sqlite3
+    from sampoagent.db.repository import Repository
+
+    database_path = tmp_path / "checked-legacy-cv-archive.db"
+    connection = sqlite3.connect(database_path)
+    connection.execute(
+        "CREATE TABLE cv_archive (id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE, checksum TEXT NOT NULL, "
+        "language TEXT NOT NULL, role_family TEXT NOT NULL, source_job_id INTEGER, fit_score INTEGER NOT NULL DEFAULT 0, "
+        "ats_score INTEGER NOT NULL DEFAULT 0, text_check_performed INTEGER NOT NULL DEFAULT 0, "
+        "strategy TEXT NOT NULL, created_at TEXT NOT NULL)"
+    )
+    connection.execute(
+        "INSERT INTO cv_archive(path, checksum, language, role_family, fit_score, ats_score, text_check_performed, strategy, created_at) "
+        "VALUES ('/local/checked.pdf', 'old-hash', 'en', 'universal', 0, 88, 1, 'generated', '2026-09-30T00:00:00+00:00')"
+    )
+    connection.commit()
+    connection.close()
+
+    repository = Repository(database_path)
+    repository.initialize()
+    archive = repository.cv_archives()[0]
+
+    assert archive["text_check_score"] == 88
+    assert archive["text_check_performed"] == 1
+    repository.archive_cv(
+        path="/local/new.pdf", checksum="new-hash", language="en", role_family="universal",
+        source_job_id=None, fit_score=0, text_check_score=67, strategy="generated",
+    )
+    added = next(item for item in repository.cv_archives() if item["path"] == "/local/new.pdf")
+    assert added["text_check_score"] == 67
+    assert added["text_check_performed"] == 1
+    repository.archive_cv(
+        path="/local/legacy-api.pdf", checksum="legacy-api-hash", language="en", role_family="universal",
+        source_job_id=None, fit_score=0, ats_score=72, strategy="generated",
+    )
+    compatible = next(item for item in repository.cv_archives() if item["path"] == "/local/legacy-api.pdf")
+    assert compatible["text_check_score"] == 72
+    assert compatible["text_check_performed"] == 1
+    repository.connection.close()
+
+
 def test_confirmed_cv_outcomes_break_ties_only_between_qualified_templates(tmp_path: Path):
     from reportlab.pdfgen.canvas import Canvas
 
@@ -222,7 +264,7 @@ def test_confirmed_cv_outcomes_break_ties_only_between_qualified_templates(tmp_p
     candidate = {"name": "Aino Example", "email": "aino@example.test"}
     facts = [{"type": "skill", "value": "Forklift operation", "confirmed": True}]
     archived = [
-        {"path": str(path), "checksum": sha256(path.read_bytes()).hexdigest(), "language": "en", "role_family": "warehouse_logistics", "ats_score": 100}
+        {"path": str(path), "checksum": sha256(path.read_bytes()).hexdigest(), "language": "en", "role_family": "warehouse_logistics", "text_check_score": 100}
         for path in templates
     ]
 
@@ -247,7 +289,7 @@ def test_cv_learning_adjustments_use_only_confirmed_outcome_records(tmp_path: Pa
     checksum = sha256(cv.read_bytes()).hexdigest()
     repository.archive_cv(
         path=str(cv), checksum=checksum, language="en", role_family="warehouse_logistics",
-        source_job_id=1, fit_score=92, ats_score=100, strategy="generated",
+        source_job_id=1, fit_score=92, text_check_score=100, strategy="generated",
     )
     job_ids = [1]
     for index in range(4):
@@ -285,7 +327,7 @@ def test_archived_cv_reuse_fit_includes_confirmed_experience_records(tmp_path: P
         output_dir=tmp_path / "generated",
         archived=[{
             "path": str(template), "checksum": sha256(template.read_bytes()).hexdigest(),
-            "language": "en", "role_family": "cleaning_facilities", "ats_score": 100,
+            "language": "en", "role_family": "cleaning_facilities", "text_check_score": 100,
         }],
         job={
             "id": 31, "title": "School Cleaner",

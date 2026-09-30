@@ -2,7 +2,7 @@ from fastapi.testclient import TestClient
 
 from sampoagent.app.main import create_app
 from sampoagent.candidate.service import ingest_text_cv
-from sampoagent.cv.service import generate_cv_pdf, validate_ats_pdf
+from sampoagent.cv.service import check_pdf_text, generate_cv_pdf
 
 
 def test_swedish_work_and_education_lines_become_unconfirmed_dated_records(tmp_path):
@@ -57,7 +57,7 @@ def test_generated_cv_includes_confirmed_structured_dates_and_employer(tmp_path)
         }]},
     )
 
-    report = validate_ats_pdf(path, required=["Cleaner", "Northstar Oy", "2021-02", "2023-04"])
+    report = check_pdf_text(path, required=["Cleaner", "Northstar Oy", "2021-02", "2023-04"])
     assert report.passed is True
 
 

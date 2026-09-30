@@ -1,1 +1,1 @@
-"""ATS-safe CV tailoring and validation."""
+"""Confirmed-fact CV generation and parsed-PDF text checks."""

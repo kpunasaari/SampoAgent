@@ -124,7 +124,7 @@ class Repository:
             CREATE TABLE IF NOT EXISTS mailbox_messages (id INTEGER PRIMARY KEY, provider TEXT NOT NULL, provider_message_id TEXT NOT NULL, sender TEXT NOT NULL, subject TEXT NOT NULL, snippet TEXT NOT NULL, received_at TEXT NOT NULL, link TEXT NOT NULL, reviewed INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, UNIQUE(provider, provider_message_id));
             CREATE TABLE IF NOT EXISTS captcha_tasks (id INTEGER PRIMARY KEY, application_id INTEGER NOT NULL UNIQUE, detected_url TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'WAITING_USER', note TEXT NOT NULL DEFAULT '', outcome TEXT, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, FOREIGN KEY(application_id) REFERENCES applications(id));
             CREATE TABLE IF NOT EXISTS application_claims (job_id INTEGER PRIMARY KEY, application_id INTEGER NOT NULL UNIQUE, FOREIGN KEY(job_id) REFERENCES jobs(id), FOREIGN KEY(application_id) REFERENCES applications(id));
-            CREATE TABLE IF NOT EXISTS cv_archive (id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE, checksum TEXT NOT NULL, language TEXT NOT NULL, role_family TEXT NOT NULL, source_job_id INTEGER, fit_score INTEGER NOT NULL DEFAULT 0, ats_score INTEGER NOT NULL DEFAULT 0, text_check_performed INTEGER NOT NULL DEFAULT 0, strategy TEXT NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY(source_job_id) REFERENCES jobs(id));
+            CREATE TABLE IF NOT EXISTS cv_archive (id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE, checksum TEXT NOT NULL, language TEXT NOT NULL, role_family TEXT NOT NULL, source_job_id INTEGER, fit_score INTEGER NOT NULL DEFAULT 0, ats_score INTEGER NOT NULL DEFAULT 0, text_check_performed INTEGER NOT NULL DEFAULT 0, text_check_score INTEGER NOT NULL DEFAULT 0, strategy TEXT NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY(source_job_id) REFERENCES jobs(id));
             CREATE TABLE IF NOT EXISTS application_learning (application_id INTEGER PRIMARY KEY, role_family TEXT NOT NULL, outcome TEXT NOT NULL, observed_at TEXT NOT NULL, FOREIGN KEY(application_id) REFERENCES applications(id));
             CREATE TABLE IF NOT EXISTS application_attempts (id INTEGER PRIMARY KEY, application_id INTEGER NOT NULL, state TEXT NOT NULL, package_hash TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT, message TEXT NOT NULL DEFAULT '', FOREIGN KEY(application_id) REFERENCES applications(id));
             CREATE TABLE IF NOT EXISTS automation_worker_lease (id INTEGER PRIMARY KEY CHECK(id=1), owner TEXT NOT NULL, expires_at TEXT NOT NULL, updated_at TEXT NOT NULL);
@@ -159,6 +159,11 @@ class Repository:
             self.connection.execute("ALTER TABLE cv_archive ADD COLUMN ats_score INTEGER NOT NULL DEFAULT 0")
         if "text_check_performed" not in cv_columns:
             self.connection.execute("ALTER TABLE cv_archive ADD COLUMN text_check_performed INTEGER NOT NULL DEFAULT 0")
+        if "text_check_score" not in cv_columns:
+            self.connection.execute("ALTER TABLE cv_archive ADD COLUMN text_check_score INTEGER NOT NULL DEFAULT 0")
+            self.connection.execute(
+                "UPDATE cv_archive SET text_check_score=ats_score WHERE text_check_performed=1"
+            )
         fact_columns = {row[1] for row in self.connection.execute("PRAGMA table_info(facts)")}
         if "evidence_json" not in fact_columns:
             self.connection.execute("ALTER TABLE facts ADD COLUMN evidence_json TEXT NOT NULL DEFAULT ''")
@@ -1613,12 +1618,22 @@ class Repository:
             self.connection.rollback()
             raise
 
-    def archive_cv(self, *, path: str, checksum: str, language: str, role_family: str, source_job_id: int | None, fit_score: int, strategy: str, ats_score: int | None = None) -> None:
-        if language not in {"fi", "en", "unknown"} or not 0 <= fit_score <= 100 or (ats_score is not None and not 0 <= ats_score <= 100) or strategy not in {"uploaded", "generated", "reused"}:
+    def archive_cv(
+        self, *, path: str, checksum: str, language: str, role_family: str,
+        source_job_id: int | None, fit_score: int, strategy: str,
+        text_check_score: int | None = None, ats_score: int | None = None,
+    ) -> None:
+        if text_check_score is not None and ats_score is not None and text_check_score != ats_score:
+            raise ValueError("Conflicting legacy and current CV text-check scores")
+        provided_score = text_check_score if text_check_score is not None else ats_score
+        if language not in {"fi", "en", "unknown"} or not 0 <= fit_score <= 100 or (provided_score is not None and not 0 <= provided_score <= 100) or strategy not in {"uploaded", "generated", "reused"}:
             raise ValueError("Invalid CV archive metadata")
-        score = 0 if ats_score is None else ats_score
-        checked = int(ats_score is not None)
-        self.connection.execute("INSERT OR IGNORE INTO cv_archive(path, checksum, language, role_family, source_job_id, fit_score, ats_score, text_check_performed, strategy, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (path, checksum, language, role_family, source_job_id, fit_score, score, checked, strategy, datetime.now(timezone.utc).isoformat()))
+        score = 0 if provided_score is None else provided_score
+        checked = int(provided_score is not None)
+        self.connection.execute(
+            "INSERT OR IGNORE INTO cv_archive(path, checksum, language, role_family, source_job_id, fit_score, ats_score, text_check_performed, text_check_score, strategy, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (path, checksum, language, role_family, source_job_id, fit_score, score, checked, score, strategy, datetime.now(timezone.utc).isoformat()),
+        )
         self.connection.commit()
 
     def cv_archives(self) -> list[dict[str, object]]:

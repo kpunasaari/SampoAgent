@@ -42,6 +42,19 @@ def test_jobs_page_requires_a_selected_role_before_search_and_keeps_manual_entry
     assert "Add a job manually" in response.text
 
 
+def test_personalized_searches_are_collapsed_and_grouped_by_source(tmp_path):
+    app = create_app(database_path=tmp_path / "compact-search-links.db", demo_data=True)
+
+    response = TestClient(app).get("/jobs")
+
+    assert response.status_code == 200
+    assert "<details class='search-links-disclosure'>" in response.text
+    assert "<summary>26 searches across 13 sources</summary>" in response.text
+    disclosure = response.text.split("<details class='search-links-disclosure'>", 1)[1].split("</details>", 1)[0]
+    assert disclosure.count("<li class='search-source-group'>") == 13
+    assert disclosure.count("href='https://www.google.com/search?q=") == 26
+
+
 def test_discovery_post_needs_no_manual_job_fields_and_never_fetches_browser_only(tmp_path):
     app = create_app(database_path=tmp_path / "jobs-run.db")
     app.state.repository.save_profile("Kai", "en")

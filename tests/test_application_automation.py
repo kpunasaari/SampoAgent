@@ -713,9 +713,18 @@ def test_runner_passes_the_reviewed_cv_checksum_to_the_final_submit_guard(tmp_pa
 
 
 def test_synthetic_employer_e2e_posts_exact_cv_once_and_records_same_origin_receipt(tmp_path):
+    from datetime import datetime, timedelta, timezone
     from email.parser import BytesParser
     from email.policy import default
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import ssl
+    import threading
+    from urllib.parse import urlsplit
 
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
     from playwright.sync_api import sync_playwright
 
     from sampoagent.agents.playwright_adapter import PlaywrightBrowserAgent
@@ -725,55 +734,108 @@ def test_synthetic_employer_e2e_posts_exact_cv_once_and_records_same_origin_rece
     cv_bytes = b"%PDF-1.4\nsynthetic reviewed candidate CV\n%%EOF"
     cv_path.write_bytes(cv_bytes)
     repository.update_application_cv_path(application_id, str(cv_path))
-    application_url = str(repository.job(1)["application_url"])
+    host = "careers.northstar-logistics.fi"
     html = """<!doctype html><meta charset="utf-8"><form method="post" enctype="multipart/form-data" action="/apply/warehouse">
       <label for="full-name">Full name</label><input id="full-name" name="full_name" required>
       <label for="email">Email address</label><input id="email" name="email" type="email" required>
       <label for="resume">Upload your CV</label><input id="resume" name="resume" type="file" accept="application/pdf,.pdf" required>
-      <button type="submit">Apply</button></form>
-      <script>
-        document.querySelector('form').addEventListener('submit', async event => {
-          event.preventDefault();
-          const form = event.currentTarget;
-          const values = new FormData(form);
-          const file = values.get('resume');
-          const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer());
-          const sha256 = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
-          await window.recordSyntheticForm({
-            fullName: values.get('full_name'), email: values.get('email'),
-            fileName: file.name, fileSize: file.size, fileSha256: sha256,
-          });
-          HTMLFormElement.prototype.submit.call(form);
-        }, { once: true });
-      </script>"""
+      <button type="submit">Apply</button></form>"""
     captured_posts = []
-    captured_forms = []
+    response_body = b"<!doctype html><h1>Application received</h1>"
 
-    with sync_playwright() as playwright:
-        chromium = playwright.chromium.launch(headless=True)
-        page = chromium.new_page()
-        page.expose_function("recordSyntheticForm", lambda data: captured_forms.append(data))
+    class SyntheticEmployer(BaseHTTPRequestHandler):
+        def log_message(self, _format, *_args):
+            return
 
-        def employer_page(route):
-            request = route.request
-            if request.method == "POST":
-                captured_posts.append((dict(request.headers), request.post_data_buffer))
-                route.fulfill(
-                    status=200,
-                    content_type="text/html",
-                    body="<!doctype html><h1>Application received</h1>",
-                )
-            else:
-                route.fulfill(status=200, content_type="text/html", body=html)
+        def do_GET(self):
+            if self.path != "/apply/warehouse":
+                self.send_error(404)
+                return
+            payload = html.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
 
-        page.route("https://careers.northstar-logistics.fi/**", employer_page)
-        browser = PlaywrightBrowserAgent(tmp_path / "browser-profile")
-        browser._context = chromium
-        browser._page = page
-        try:
-            result = process_application(repository, application_id, browser)
-        finally:
-            browser.close()
+        def do_POST(self):
+            content_length = int(self.headers.get("Content-Length", "0"))
+            captured_posts.append((self.path, dict(self.headers.items()), self.rfile.read(content_length)))
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(response_body)))
+            self.end_headers()
+            self.wfile.write(response_body)
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, host)])
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(subject)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(days=1))
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName(host)]), critical=False)
+        .sign(key, hashes.SHA256())
+    )
+    certificate_path = tmp_path / "synthetic-employer.crt"
+    key_path = tmp_path / "synthetic-employer.key"
+    certificate_path.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.TraditionalOpenSSL,
+        serialization.NoEncryption(),
+    ))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), SyntheticEmployer)
+    server.daemon_threads = True
+    tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls.load_cert_chain(certificate_path, key_path)
+    server.socket = tls.wrap_socket(server.socket, server_side=True)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    application_url = f"https://{host}:{server.server_port}/apply/warehouse"
+    repository.connection.execute("UPDATE jobs SET application_url=? WHERE id=1", (application_url,))
+    repository.connection.commit()
+    repository.mark_job_user_reviewed(1, reviewed_current=True)
+
+    try:
+        with sync_playwright() as playwright:
+            chromium = playwright.chromium.launch(
+                headless=True,
+                args=[
+                    f"--host-resolver-rules=MAP {host} 127.0.0.1",
+                    "--proxy-server=direct://",
+                    "--proxy-bypass-list=*",
+                ],
+            )
+            context = chromium.new_context(ignore_https_errors=True)
+            page = context.new_page()
+
+            def contain_fixture_egress(route):
+                destination = urlsplit(route.request.url)
+                if (destination.scheme, destination.hostname, destination.port) == (
+                    "https", host, server.server_port,
+                ):
+                    route.continue_()
+                else:
+                    route.abort("blockedbyclient")
+
+            context.route("**/*", contain_fixture_egress)
+            browser = PlaywrightBrowserAgent(tmp_path / "browser-profile")
+            browser._context = context
+            browser._page = page
+            try:
+                result = process_application(repository, application_id, browser)
+            finally:
+                browser.close()
+                chromium.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=2)
 
     application = repository.application(application_id)
     attempts = repository.connection.execute(
@@ -785,17 +847,11 @@ def test_synthetic_employer_e2e_posts_exact_cv_once_and_records_same_origin_rece
     assert len(attempts) == 1
     assert attempts[0]["state"] == "SUBMITTED"
     assert len(captured_posts) == 1
-    assert captured_forms == [{
-        "fullName": "Aino Example",
-        "email": "aino@example.test",
-        "fileName": cv_path.name,
-        "fileSize": len(cv_bytes),
-        "fileSha256": sha256(cv_bytes).hexdigest(),
-    }]
 
-    headers, body = captured_posts[0]
+    post_path, headers, body = captured_posts[0]
+    assert post_path == "/apply/warehouse"
     message = BytesParser(policy=default).parsebytes(
-        f"Content-Type: {headers['content-type']}\r\nMIME-Version: 1.0\r\n\r\n".encode() + body
+        f"Content-Type: {headers['Content-Type']}\r\nMIME-Version: 1.0\r\n\r\n".encode() + body
     )
     submitted_fields = {}
     uploaded_parts = []
@@ -810,6 +866,7 @@ def test_synthetic_employer_e2e_posts_exact_cv_once_and_records_same_origin_rece
     assert submitted_fields == {"full_name": "Aino Example", "email": "aino@example.test"}
     assert len(uploaded_parts) == 1
     assert uploaded_parts[0][0] == cv_path.name
+    assert sha256(uploaded_parts[0][1]).hexdigest() == sha256(cv_bytes).hexdigest()
     evidence = repository.submission_evidence_for_application(application_id)
     assert evidence[0]["final_url"] == application_url
     repository.connection.close()

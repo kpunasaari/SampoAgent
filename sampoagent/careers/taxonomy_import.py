@@ -11,9 +11,14 @@ import csv
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
-from typing import Iterable
+import stat
+import struct
+import tempfile
+from typing import BinaryIO, Iterable
+import zlib
+from zipfile import BadZipFile, ZipFile
 
 from sampoagent.careers.taxonomy import TaxonomyOccupation, TaxonomyOccupationSkill
 from sampoagent.db.repository import Repository
@@ -28,6 +33,9 @@ ESCO_MODIFIED_NOTICE = "SampoAgent builds a local multilingual matching index fr
 ESCO_QUALITY_NOTICE = "ESCO states that accuracy, currency and translation completeness are not guaranteed."
 _VERSION = re.compile(r"^\d+\.\d+(?:\.\d+)?$")
 _LANGUAGE = re.compile(r"^[a-z]{2,3}$")
+MAX_ESCO_ARCHIVE_BYTES = 160 * 1024 * 1024
+MAX_ESCO_ARCHIVE_MEMBERS = 512
+MAX_ESCO_SELECTED_CSV_BYTES = 320 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -88,6 +96,108 @@ def _find_file(package: Path, stem: str, language: str | None = None) -> Path:
         if len(fingerprints) != 1:
             raise ValueError(f"ESCO package has ambiguous {stem} CSV files")
     return sorted(candidates, key=lambda path: str(path).casefold())[0]
+
+
+def _find_files(package: Path, stem: str) -> list[Path]:
+    prefix = f"{stem}_".casefold()
+    candidates = [
+        path for path in package.rglob("*.csv")
+        if path.is_file() and (path.stem.casefold() == stem.casefold() or path.stem.casefold().startswith(prefix))
+    ]
+    if not candidates:
+        raise ValueError(f"ESCO package is missing {stem}.csv")
+    return sorted(candidates, key=lambda path: str(path).casefold())
+
+
+def import_esco_archive(
+    repository: Repository,
+    archive_file: BinaryIO,
+    *,
+    version: str,
+    languages: Iterable[str] = ("fi", "en"),
+) -> TaxonomyImportSummary:
+    """Safely import selected CSV members from a user-downloaded ESCO ZIP.
+
+    Only the chosen occupation/skill CSVs and occupation-skill relation CSVs
+    are materialized in a temporary directory. The archive itself is never
+    retained, and unsafe paths, symlinks, encrypted members, and oversized
+    inputs fail before the current taxonomy index is replaced.
+    """
+    if not _VERSION.fullmatch(version):
+        raise ValueError("ESCO version must look like 1.2.1")
+    selected = tuple(sorted({str(language).casefold() for language in languages}))
+    if not selected or any(not _LANGUAGE.fullmatch(language) for language in selected):
+        raise ValueError("Select one or more valid ESCO language codes")
+    try:
+        archive_file.seek(0, 2)
+        compressed_bytes = archive_file.tell()
+        archive_file.seek(0)
+    except (AttributeError, OSError, ValueError):
+        raise ValueError("ESCO ZIP must be a seekable file.") from None
+    if compressed_bytes <= 0 or compressed_bytes > MAX_ESCO_ARCHIVE_BYTES:
+        raise ValueError("ESCO ZIP is empty or exceeds the upload size limit.")
+
+    requested_names = {
+        f"{stem}_{language}.csv".casefold()
+        for language in selected
+        for stem in ("occupations", "skills")
+    }
+    try:
+        zipped = ZipFile(archive_file)
+    except (BadZipFile, OSError, ValueError):
+        raise ValueError("ESCO upload is not a readable ZIP archive.") from None
+
+    with zipped, tempfile.TemporaryDirectory(prefix="sampoagent-esco-") as temporary:
+        try:
+            infos = zipped.infolist()
+        except (BadZipFile, OSError, EOFError, struct.error):
+            raise ValueError("ESCO ZIP has an invalid central directory.") from None
+        if len(infos) > MAX_ESCO_ARCHIVE_MEMBERS:
+            raise ValueError("ESCO ZIP contains too many archive entries.")
+        selected_infos = []
+        selected_bytes = 0
+        for info in infos:
+            member_path = PurePosixPath(info.filename)
+            if (
+                "\\" in info.filename
+                or member_path.is_absolute()
+                or ".." in member_path.parts
+                or (member_path.parts and ":" in member_path.parts[0])
+            ):
+                raise ValueError("ESCO ZIP contains an unsafe archive path.")
+            mode = info.external_attr >> 16
+            if stat.S_ISLNK(mode):
+                raise ValueError("ESCO ZIP may not contain symbolic links.")
+            if info.flag_bits & 0x1:
+                raise ValueError("Encrypted ESCO ZIP members are not supported.")
+            if info.is_dir():
+                continue
+            basename = member_path.name.casefold()
+            relation_file = basename.startswith("occupationskillrelations") and basename.endswith(".csv")
+            if basename not in requested_names and not relation_file:
+                continue
+            if info.file_size < 0 or info.file_size > MAX_ESCO_SELECTED_CSV_BYTES:
+                raise ValueError("ESCO CSV exceeds the local import size limit.")
+            selected_bytes += info.file_size
+            if selected_bytes > MAX_ESCO_SELECTED_CSV_BYTES:
+                raise ValueError("Selected ESCO CSV files exceed the local import size limit.")
+            selected_infos.append(info)
+        if not selected_infos:
+            raise ValueError("ESCO ZIP contains no CSV files for the selected languages.")
+
+        extracted = Path(temporary)
+        for index, info in enumerate(selected_infos):
+            destination_dir = extracted / f"member-{index:04d}"
+            destination_dir.mkdir()
+            destination = destination_dir / PurePosixPath(info.filename).name
+            try:
+                with zipped.open(info) as source, destination.open("xb") as target:
+                    while chunk := source.read(1024 * 1024):
+                        target.write(chunk)
+            except (BadZipFile, OSError, RuntimeError, EOFError, NotImplementedError, struct.error, zlib.error):
+                raise ValueError("ESCO ZIP is corrupt or cannot be read.") from None
+
+        return import_esco_package(repository, extracted, version=version, languages=selected)
 
 
 def _read_concepts(path: Path, *, occupations: bool) -> list[dict[str, str]]:
@@ -179,17 +289,30 @@ def import_esco_package(
         skills.extend({**item, "language": language} for item in skill_rows)
         language_files.append((language, occupation_rows, skill_rows, occupation_file, skill_file))
 
-    relationship_file = _find_file(package, "occupationSkillRelations")
+    relationship_files = _find_files(package, "occupationSkillRelations")
     occupation_uris = {item["uri"] for item in occupations}
     skill_uris = {item["uri"] for item in skills}
-    relationships, skipped = _read_relationships(relationship_file, occupation_uris, skill_uris)
+    relationship_map: dict[tuple[str, str], str] = {}
+    skipped = 0
+    for relationship_file in relationship_files:
+        current, skipped_in_file = _read_relationships(relationship_file, occupation_uris, skill_uris)
+        skipped += skipped_in_file
+        for occupation_uri, skill_uri, importance in current:
+            key = (occupation_uri, skill_uri)
+            existing = relationship_map.get(key)
+            if existing is None or importance == "ESSENTIAL":
+                relationship_map[key] = importance
+    relationships = [
+        (occupation_uri, skill_uri, importance)
+        for (occupation_uri, skill_uri), importance in sorted(relationship_map.items())
+    ]
     if not relationships:
         raise ValueError("ESCO package contains no valid occupation-skill relationships")
 
     source_files = [path for _, _, _, occupation_file, skill_file in language_files for path in (occupation_file, skill_file)]
-    source_files.append(relationship_file)
+    source_files.extend(relationship_files)
     digest = sha256()
-    for path in sorted(source_files, key=lambda item: item.name.casefold()):
+    for path in sorted(source_files, key=lambda item: str(item).casefold()):
         digest.update(path.name.encode("utf-8"))
         digest.update(path.read_bytes())
     repository.replace_esco_taxonomy(

@@ -3,6 +3,7 @@
 from html import escape
 from hashlib import sha256
 import hmac
+from io import BytesIO
 import json
 import logging
 from datetime import datetime, timezone
@@ -20,6 +21,7 @@ from sampoagent.applications.answers import save_answer
 from sampoagent.applications.urls import is_safe_public_https_url
 from sampoagent.applications.workflow import classify_question
 from sampoagent.careers.recommendations import OccupationRecommendation, recommend_occupations
+from sampoagent.careers.taxonomy_import import MAX_ESCO_ARCHIVE_BYTES, import_esco_archive
 from sampoagent.candidate.service import ingest_text_cv, read_cv_file
 from sampoagent.country_packs.finland import builtin_sources
 from sampoagent.db.repository import Repository
@@ -43,6 +45,68 @@ PRIMARY_NAVIGATION = {"Dashboard", "Profile", "CVs", "Jobs", "Sources", "Applica
 NAVIGATION.insert(2, ("Application Profile", "/onboarding"))
 NAVIGATION.insert(3, ("Search & Permissions", "/onboarding/ready"))
 _APP_LOGGER = logging.getLogger("sampoagent.app")
+
+
+class _EscoUploadBodyLimitMiddleware:
+    """Enforce an ESCO upload cap before multipart parsing can spool the body."""
+
+    def __init__(self, app, *, max_bytes: int) -> None:
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope.get("type") != "http" or scope.get("path") != "/careers/esco/import" or scope.get("method") != "POST":
+            await self.app(scope, receive, send)
+            return
+
+        async def reject() -> None:
+            body = b"ESCO upload exceeds the local request size limit."
+            await send({
+                "type": "http.response.start",
+                "status": 413,
+                "headers": [
+                    (b"content-type", b"text/plain; charset=utf-8"),
+                    (b"content-length", str(len(body)).encode("ascii")),
+                    (b"cache-control", b"no-store"),
+                ],
+            })
+            await send({"type": "http.response.body", "body": body, "more_body": False})
+
+        content_length = next(
+            (value for key, value in scope.get("headers", []) if key.lower() == b"content-length"),
+            None,
+        )
+        if content_length is not None:
+            try:
+                if int(content_length) > self.max_bytes:
+                    await reject()
+                    return
+            except ValueError:
+                pass
+
+        received = 0
+        exceeded = False
+        response_messages = []
+
+        async def capped_receive():
+            nonlocal received, exceeded
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > self.max_bytes:
+                    exceeded = True
+                    return {"type": "http.request", "body": b"", "more_body": False}
+            return message
+
+        async def capture_response(message) -> None:
+            response_messages.append(message)
+
+        await self.app(scope, capped_receive, capture_response)
+        if exceeded:
+            await reject()
+        else:
+            for message in response_messages:
+                await send(message)
 
 
 def _page(title: str, body: str, *, path: str | None = None) -> HTMLResponse:
@@ -130,6 +194,10 @@ def create_app(
     app.state.repository = repository
     app.state.email_oauth_states = {}
     app.state.local_action_token = secrets.token_hex(32)
+    app.add_middleware(
+        _EscoUploadBodyLimitMiddleware,
+        max_bytes=MAX_ESCO_ARCHIVE_BYTES + 64 * 1024,
+    )
     if automation_worker is None and manage_automation_worker:
         from sampoagent.applications.worker_controller import AutopilotWorkerController
 
@@ -430,7 +498,7 @@ def create_app(
         return RedirectResponse("/profile", status_code=303)
 
     @app.get("/careers", response_class=HTMLResponse)
-    def careers() -> HTMLResponse:
+    def careers(request: Request, notice: str = Query(default="")) -> HTMLResponse:
         recommendations = occupation_recommendations()
         targets = repository.target_occupations()
         active_targets = {(str(target["title_en"]), str(target["title_fi"])) for target in targets if target["enabled"]}
@@ -460,10 +528,25 @@ def create_app(
         else:
             taxonomy_note = (
                 "<p class='notice'>Showing the small built-in starter catalogue. For a broad occupation and skill index, "
-                "download an ESCO CSV package from the European Commission, then import it locally with "
-                "<code>sampoagent import-esco &lt;directory&gt; --version 1.2.1 --languages fi en</code>. "
-                "The package is not bundled or uploaded by SampoAgent.</p>"
+                "download an ESCO CSV package from the European Commission, then upload the ZIP below. "
+                "The package is not bundled or sent outside this computer by SampoAgent.</p>"
             )
+        csrf = str(app.state.local_action_token)
+        notice_markup = f"<p class='notice' role='status'>{escape(notice)}</p>" if notice else ""
+        taxonomy_import = (
+            "<section><h3>Import a broad occupation and skill catalogue</h3>"
+            "<p>First, use the official ESCO download page to choose the classification, CSV format, and the languages you need. "
+            "ESCO sends the selected package link by email after you review its privacy statement; SampoAgent does not request it for you. "
+            "Then upload that ZIP here. The app reads selected CSVs locally, deletes temporary files after import, and never sends candidate data to ESCO.</p>"
+            "<form method='post' action='/careers/esco/import' enctype='multipart/form-data'>"
+            f"<input type='hidden' name='csrf_token' value='{csrf}'>"
+            "<label>ESCO ZIP <input name='file' type='file' accept='.zip,application/zip' required></label>"
+            "<label>Dataset version <input name='version' value='1.2.1' pattern='[0-9]+\\.[0-9]+(\\.[0-9]+)?' required></label>"
+            "<label>Language codes <input name='languages' value='fi,en' placeholder='fi,en' required></label>"
+            "<button>Validate and import locally</button></form>"
+            "<p><a href='https://esco.ec.europa.eu/en/use-esco/download' target='_blank' rel='noopener noreferrer'>Open the official ESCO download page</a>. "
+            "Recommendations remain suggestions; importing a catalogue does not activate any job-search target.</p></section>"
+        )
         profiles = "".join(
             f"<tr><td>{escape(str(profile['name']))}</td><td>{escape(str(profile['notes']))}</td><td>{'Active' if profile['enabled'] else 'Inactive'}</td><td><form style='display:inline' method='post' action='/careers/profiles/{profile['id']}/toggle'><button>{'Deactivate' if profile['enabled'] else 'Activate'}</button></form> <details><summary>Edit</summary><form method='post' action='/careers/profiles/{profile['id']}/edit'><label>Name <input name='name' value='{escape(str(profile['name']))}' required></label><label>Notes <input name='notes' value='{escape(str(profile['notes']))}'></label><button>Save</button></form></details> <form method='post' action='/careers/profiles/{profile['id']}/delete'><button class='danger'>Delete</button></form></td></tr>"
             for profile in repository.rows("career_profiles")
@@ -473,7 +556,44 @@ def create_app(
             for target in targets
         ) or "<tr><td colspan='3'>No approved targets yet.</td></tr>"
         form = "<form method='post' action='/careers/profiles'><label>Career profile <input name='name' required></label> <label>Notes <input name='notes'></label> <button>Add profile</button></form>"
-        return _page("Career Suggestions", f"<section><p>Recommendations are never activated automatically. Choose Make target only for occupations you want to pursue. ESCO essential skill links are matching evidence, not legal licence or education requirements. Country-pack notices below are sourced prompts to check the relevant authority, never an automated eligibility decision.</p>{taxonomy_note}<table><tr><th>Role</th><th>Match</th><th>Supporting facts</th><th>Essential skill links not yet represented</th><th>Country qualification checks</th><th>Target</th></tr>{content}</table></section><section><h3>My target occupations</h3><p>These are your explicit, local target choices. You can pause any target without deleting it.</p><table><tr><th>Role</th><th>State</th><th>Action</th></tr>{target_rows}</table></section><section><h3>My career profiles</h3><p>Add more than one career direction; changes affect only your local preferences.</p>{form}<table><tr><th>Name</th><th>Notes</th><th>State</th><th>Actions</th></tr>{profiles}</table></section>")
+        response = _page("Career Suggestions", f"{notice_markup}<section><p>Recommendations are never activated automatically. Choose Make target only for occupations you want to pursue. ESCO essential skill links are matching evidence, not legal licence or education requirements. Country-pack notices below are sourced prompts to check the relevant authority, never an automated eligibility decision.</p>{taxonomy_note}<table><tr><th>Role</th><th>Match</th><th>Supporting facts</th><th>Essential skill links not yet represented</th><th>Country qualification checks</th><th>Target</th></tr>{content}</table></section>{taxonomy_import}<section><h3>My target occupations</h3><p>These are your explicit, local target choices. You can pause any target without deleting it.</p><table><tr><th>Role</th><th>State</th><th>Action</th></tr>{target_rows}</table></section><section><h3>My career profiles</h3><p>Add more than one career direction; changes affect only your local preferences.</p>{form}<table><tr><th>Name</th><th>Notes</th><th>State</th><th>Actions</th></tr>{profiles}</table></section>", path="/careers")
+        _set_local_form_cookie(response, app)
+        return response
+
+    @app.post("/careers/esco/import")
+    def import_career_taxonomy(
+        request: Request,
+        file: UploadFile = File(...),
+        version: str = Form(...),
+        languages: str = Form("fi,en"),
+        csrf_token: str = Form(""),
+    ) -> RedirectResponse:
+        try:
+            if not _local_form_token_matches(request, csrf_token, app):
+                notice = "Refresh the Career Suggestions page before importing an ESCO package."
+            elif not file.filename or Path(file.filename).suffix.casefold() != ".zip":
+                notice = "Choose the ZIP package downloaded from the official ESCO portal. The previous catalogue was kept."
+            elif file.size is not None and file.size > MAX_ESCO_ARCHIVE_BYTES:
+                notice = "This ESCO ZIP exceeds the 160 MiB local import limit. The previous catalogue was kept."
+            else:
+                try:
+                    payload = file.file.read(MAX_ESCO_ARCHIVE_BYTES + 1)
+                    if len(payload) > MAX_ESCO_ARCHIVE_BYTES:
+                        raise ValueError("size")
+                    language_codes = tuple(part for part in languages.replace(";", ",").replace(" ", ",").split(",") if part)
+                    summary = import_esco_archive(
+                        repository, BytesIO(payload), version=version.strip(), languages=language_codes,
+                    )
+                    notice = (
+                        f"Imported ESCO {summary.version} ({', '.join(summary.languages)}): "
+                        f"{summary.occupations} occupations, {summary.skills} skills, "
+                        f"{summary.relationships} occupation-skill links. No role was activated as a search target."
+                    )
+                except (ValueError, OSError):
+                    notice = "Could not import this ESCO ZIP. The previous catalogue was kept; check its version, selected languages, and CSV files."
+            return RedirectResponse("/careers?notice=" + quote(notice), status_code=303)
+        finally:
+            file.file.close()
 
     @app.post("/careers/targets")
     def add_target_occupation(title_en: str = Form(...), title_fi: str = Form(...)) -> RedirectResponse:

@@ -2,7 +2,7 @@
 
 ## Offline occupation suggestions — 2026-09-30
 
-The built-in fallback matcher provides FI/EN skill aliases for 24 representative roles across multiple sectors. It is only a starter catalogue; never describe it as all occupations or as a qualification/eligibility check. Users may import their own downloaded ESCO CSV files into the local index for broader occupation coverage. Do not send candidate skills to the public ESCO API. Recommendations never activate a search target automatically.
+The built-in fallback matcher provides FI/EN skill aliases for 24 representative roles across multiple sectors. It is only a starter catalogue; never describe it as all occupations or as a qualification/eligibility check. Users may import their own downloaded ESCO CSV files into the local index for broader occupation coverage through Career Suggestions ZIP upload or the CLI directory importer. The app never submits the ESCO download email form; validate ZIP paths/size, extract only requested CSVs to a temporary directory, preserve the old index on failure, and keep the dataset out of Git. Do not send candidate skills to the public ESCO API. Recommendations never activate a search target automatically.
 
 ## Questionnaire update — 2026-09-29
 
@@ -19,7 +19,10 @@ as source-linked candidate facts; other transferable skills inform role suggesti
 without becoming professional CV skills. Recommendations are not search targets
 until the user activates a role. The optional ESCO CSV importer keeps the selected
 multilingual catalogue locally, stores version/source SHA-256/licence and required
-attribution metadata, and never bundles or uploads dataset files. CV uploads parse
+attribution metadata, and never bundles or uploads dataset files. The Career Suggestions
+page accepts a user-downloaded ESCO ZIP after local CSRF validation; it rejects unsafe
+archive paths, limits uploaded/expanded data, and deletes temporary CSVs after import.
+CV uploads parse
 common Finnish/English section headings and keep extracted claims unconfirmed with
 source page/line spans in SQLite and Profile. Common Finnish, Swedish and English
 application-form labels map only when their meanings are unambiguous; employer-only

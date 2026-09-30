@@ -66,6 +66,25 @@ def _text(path: Path) -> str:
     return ""
 
 
+def _normalized_text(value: str) -> str:
+    return re.sub(r"\s+", " ", value).casefold().strip()
+
+
+def _contains_current_candidate_identity(text: str, candidate: dict[str, str]) -> bool:
+    """Avoid reusing a reviewed PDF that would carry another profile's identity forward."""
+    normalized = _normalized_text(text)
+    name = str(candidate.get("name", "")).strip()
+    email = str(candidate.get("email", "")).strip()
+    if not name or _normalized_text(name) not in normalized:
+        return False
+    if email and _normalized_text(email) not in normalized:
+        return False
+    embedded_emails = re.findall(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", text)
+    if embedded_emails and (not email or any(_normalized_text(item) != _normalized_text(email) for item in embedded_emails)):
+        return False
+    return True
+
+
 def _confirmed_records(records: dict[str, list[dict[str, str]]]) -> dict[str, list[dict[str, str]]]:
     return {
         record_type: [
@@ -127,6 +146,7 @@ def choose_application_cv(*, output_dir: Path, archived: list[dict[str, object]]
     learning = learning_adjustments or {}
     reusable: list[tuple[int, int, int, CVChoice]] = []
     corrupt_archive_found = False
+    identity_mismatch_found = False
     for index, item in enumerate(archived):
         path = Path(str(item.get("path", "")))
         if not path.is_file() or not item.get("checksum"):
@@ -142,6 +162,9 @@ def choose_application_cv(*, output_dir: Path, archived: list[dict[str, object]]
             corrupt_archive_found = True
             continue
         text = _text(path)
+        if not _contains_current_candidate_identity(text, candidate):
+            identity_mismatch_found = True
+            continue
         score, reasons = assess_cv_fit(
             text, job=job, facts=usable_facts, records=usable_records, role_family=family,
             cv_role_family=str(item.get("role_family", "")), cv_language=str(item.get("language", "")), language=language,
@@ -198,6 +221,8 @@ def choose_application_cv(*, output_dir: Path, archived: list[dict[str, object]]
         cv_role_family=family, cv_language=language, language=language,
     )
     reasons = ["No archived CV met the 85% role, language and evidence threshold", *match_reasons]
+    if identity_mismatch_found:
+        reasons.append("An archived CV was excluded because its name or email does not match the current candidate profile")
     if corrupt_archive_found:
         reasons.append("An archived file was excluded because its reviewed checksum was missing or no longer matched")
     return CVChoice(path, "generated", family, language, match_score, report.score, True, tuple(reasons), checksum)

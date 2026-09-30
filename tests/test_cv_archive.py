@@ -11,6 +11,8 @@ def test_reuses_a_matching_archived_cv_only_when_role_language_and_requirements_
     canvas = Canvas(str(template))
     canvas.drawString(50, 780, "Varastotyöntekijä")
     canvas.drawString(50, 750, "B-ajokortti trukkikokemus suomi")
+    canvas.drawString(50, 720, "Aino Example")
+    canvas.drawString(50, 690, "aino@example.test")
     canvas.save()
     choice = choose_application_cv(
         output_dir=tmp_path / "archive",
@@ -23,6 +25,39 @@ def test_reuses_a_matching_archived_cv_only_when_role_language_and_requirements_
     assert choice.strategy == "reused"
     assert choice.path == template
     assert choice.score >= 85
+
+
+def test_does_not_reuse_archived_cv_with_stale_candidate_identity(tmp_path: Path):
+    """An otherwise matching template must not carry an old candidate name or email forward."""
+    from reportlab.pdfgen.canvas import Canvas
+    from pypdf import PdfReader
+
+    template = tmp_path / "old-warehouse-cv.pdf"
+    canvas = Canvas(str(template))
+    canvas.drawString(50, 780, "Warehouse Worker")
+    canvas.drawString(50, 750, "Forklift operation")
+    canvas.drawString(50, 720, "Old Candidate")
+    canvas.drawString(50, 690, "old@example.test")
+    canvas.save()
+
+    choice = choose_application_cv(
+        output_dir=tmp_path / "generated",
+        archived=[{
+            "path": str(template), "checksum": sha256(template.read_bytes()).hexdigest(),
+            "language": "en", "role_family": "warehouse_logistics", "text_check_score": 100,
+        }],
+        job={"id": 41, "title": "Warehouse Worker", "description": "Forklift operation preferred.", "language": "en"},
+        candidate={"name": "Current Candidate", "email": "current@example.test"},
+        facts=[{"type": "skill", "value": "Forklift operation", "confirmed": True}],
+        records={},
+    )
+
+    assert choice.strategy == "generated"
+    text = "\n".join(page.extract_text() or "" for page in PdfReader(str(choice.path)).pages)
+    assert "Current Candidate" in text
+    assert "current@example.test" in text
+    assert "Old Candidate" not in text
+    assert "old@example.test" not in text
 
 
 def test_generates_and_archives_when_existing_cv_misses_required_job_evidence(tmp_path: Path):
@@ -258,6 +293,8 @@ def test_confirmed_cv_outcomes_break_ties_only_between_qualified_templates(tmp_p
         canvas = Canvas(str(path))
         canvas.drawString(50, 780, "Warehouse Worker")
         canvas.drawString(50, 750, "Forklift operation")
+        canvas.drawString(50, 720, "Aino Example")
+        canvas.drawString(50, 690, "aino@example.test")
         canvas.save()
 
     job = {"id": 20, "title": "Warehouse Worker", "description": "Forklift operation preferred.", "language": "en"}
@@ -323,6 +360,8 @@ def test_archived_cv_reuse_fit_includes_confirmed_experience_records(tmp_path: P
     canvas = Canvas(str(template))
     canvas.drawString(50, 780, "School Cleaner")
     canvas.drawString(50, 750, "School cleaning")
+    canvas.drawString(50, 720, "Aino Example")
+    canvas.drawString(50, 690, "aino@example.test")
     canvas.save()
 
     choice = choose_application_cv(

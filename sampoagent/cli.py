@@ -36,6 +36,13 @@ def initialize(path: str | Path = "sampoagent.db", *, demo: bool = False) -> Non
         repository.load_demo()
 
 
+def _close_browser_safely(browser: PlaywrightBrowserAgent) -> None:
+    try:
+        browser.close()
+    except Exception:
+        raise BrowserUnavailable("The isolated employer browser could not be closed safely.") from None
+
+
 def _run_automation(args: argparse.Namespace) -> None:
     if args.interval_seconds < 5 or args.discovery_interval_minutes < 1:
         raise SystemExit("Worker interval must be at least 5 seconds and discovery interval at least 1 minute.")
@@ -71,8 +78,10 @@ def _run_automation(args: argparse.Namespace) -> None:
     except KeyboardInterrupt:
         print("Worker stopped. No in-progress final-submit action will be retried automatically.")
     finally:
-        browser.close()
-        repository.connection.close()
+        try:
+            _close_browser_safely(browser)
+        finally:
+            repository.connection.close()
 
 
 def main() -> None:
@@ -146,8 +155,8 @@ def main() -> None:
                     print("Sign in manually in the visible employer browser. SampoAgent does not read or save your password.")
                     input("Press Enter here after sign-in is complete; the session stays in the local browser profile. ")
                 finally:
-                    agent.close()
-        except (BrowserUnavailable, ValueError, RuntimeError):
+                    _close_browser_safely(agent)
+        except Exception:
             raise SystemExit("Could not open the isolated employer browser. Check the public HTTPS URL and local browser setup.") from None
     elif args.command == "backup":
         try:
@@ -253,5 +262,7 @@ def main() -> None:
         try:
             with LocalRuntimeLock(runtime_lock_paths(args.database, args.storage_dir)):
                 _run_automation(args)
+        except BrowserUnavailable:
+            raise SystemExit("Automation browser could not be closed safely.") from None
         except RuntimeError:
             raise SystemExit("SampoAgent is already running or could not acquire its local runtime lock.") from None

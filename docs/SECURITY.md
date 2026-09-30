@@ -35,8 +35,12 @@ application logger records only that reference and the exception type. It does
 not log the exception message, traceback, request URL, or submitted form data.
 User-facing form failures, failed source-result summaries, worker status, and
 automation CLI failures use fixed messages rather than interpolated exception
-text; CLI exception chaining is suppressed at those boundaries. A synthetic
-PII/secret fixture verifies these boundaries in `tests/test_security_boundaries.py`.
+text; CLI exception chaining is suppressed at those boundaries. Chromium
+startup, manual-login navigation, and shutdown failures are normalized before
+leaving the CLI, and the automation database connection still closes if
+browser teardown fails.
+Synthetic PII/secret driver failures verify these boundaries in
+`tests/test_security_boundaries.py`.
 
 The activity/audit trail stores only a fixed allowlisted action code and a
 generic privacy detail; callers cannot persist free-form values through

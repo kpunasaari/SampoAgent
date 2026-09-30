@@ -91,9 +91,13 @@ class PlaywrightBrowserAgent:
             self._context.route_web_socket("**/*", self._block_websocket)
             self._context.on("close", self._on_context_closed)
             self._page = self._context.pages[0] if self._context.pages else self._context.new_page()
-        except Exception as exc:
-            self.close()
-            raise BrowserUnavailable("Chromium could not start. Install the Playwright browser runtime and try again.") from exc
+        except Exception:
+            try:
+                self.close()
+            except Exception:
+                # Driver cleanup can include profile paths and runtime details.
+                pass
+            raise BrowserUnavailable("Chromium could not start. Install the Playwright browser runtime and try again.") from None
 
     def close(self) -> None:
         self._closing = True
